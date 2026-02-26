@@ -1,12 +1,12 @@
 # Copilot Proxy
 
-> **Turn your GitHub Copilot subscription into an OpenAI-compatible API** - Use any Copilot model with your favorite AI tools, frameworks, and applications without leaving VS Code.
+> **Turn your GitHub Copilot subscription into an OpenAI and Anthropic-compatible API** - Use any Copilot model with your favorite AI tools, frameworks, and applications without leaving VS Code.
 
 ## About
 
-Copilot Proxy is a VS Code extension that exposes GitHub Copilot's language models through a local OpenAI-compatible API server. This lets you leverage your existing Copilot subscription to power external applications, scripts, and tools - no additional API costs, just your Copilot subscription.
+Copilot Proxy is a VS Code extension that exposes GitHub Copilot's language models through local OpenAI-compatible and Anthropic-compatible API servers. This lets you leverage your existing Copilot subscription to power external applications, scripts, and tools - no additional API costs, just your Copilot subscription.
 
-Perfect for developers who want to use Copilot's models in custom workflows, automation scripts, or with tools that expect an OpenAI-compatible endpoint.
+Perfect for developers who want to use Copilot's models in custom workflows, automation scripts, or with tools that expect an OpenAI or Anthropic-compatible endpoint - including **Claude Code**.
 
 <p align="center">
   <img src="images/CopilotProxy.png" alt="Copilot Proxy" width="600">
@@ -23,6 +23,7 @@ Perfect for developers who want to use Copilot's models in custom workflows, aut
 ## Features
 
 - **OpenAI-compatible API**: Exposes endpoints that work with any OpenAI-compatible client
+- **Anthropic-compatible API**: Exposes the `/v1/messages` endpoint for Anthropic SDK clients and Claude Code
 - **All Copilot Models**: Access any model available through your GitHub Copilot subscription
 - **Tool/Function Calling**: Full support for OpenAI-compatible tool calling with pass-through or auto-execute modes
 - **VS Code Tools Integration**: Use VS Code's registered tools (from extensions and MCP servers) in your requests
@@ -98,7 +99,8 @@ Example output:
 [10:30:15] === Copilot Proxy Starting ===
 [10:30:15] Extension version: 0.0.2
 [10:30:15] Server started on 127.0.0.1:8080
-[10:30:15] Endpoint: http://127.0.0.1:8080/v1/chat/completions
+[10:30:15] Endpoint: http://127.0.0.1:8080/v1/chat/completions (OpenAI)
+[10:30:15] Endpoint: http://127.0.0.1:8080/v1/messages (Anthropic)
 [10:30:15]   Model: GPT-4o (gpt-4o) - max 128000 tokens
 [10:30:15]   Model: Claude 3.5 Sonnet (claude-3.5-sonnet) - max 16384 tokens
 [10:30:20] Request: 3 messages, ~1500 chars (~375 tokens), model: gpt-4o, stream: true
@@ -207,6 +209,63 @@ const data = await response.json();
 console.log(data.choices[0].message.content);
 ```
 
+### With Claude Code
+
+You can use the proxy to run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) through your Copilot subscription - no Anthropic API key required.
+
+**PowerShell:**
+
+```powershell
+$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:8080'
+$env:ANTHROPIC_MODEL = 'claude-opus-4.6'
+$env:ANTHROPIC_AUTH_TOKEN = 'a'
+$env:ANTHROPIC_API_KEY = 'a'
+claude
+```
+
+**Bash/Zsh:**
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080"
+export ANTHROPIC_MODEL="claude-opus-4.6"
+export ANTHROPIC_AUTH_TOKEN="a"
+export ANTHROPIC_API_KEY="a"
+claude
+```
+
+> **Note:** The `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` values can be anything - the proxy doesn't validate them. The `ANTHROPIC_MODEL` should be a valid Anthropic model name that Claude Code recognizes. The proxy maps all requests to the best available Copilot model (or the model configured in `copilotProxy.defaultModel`).
+
+### With Anthropic Python SDK
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://127.0.0.1:8080",
+    api_key="not-needed"  # Any value works
+)
+
+message = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(message.content[0].text)
+```
+
+### With curl (Anthropic format)
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: a" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
 ### With LangChain
 
 ```python
@@ -225,6 +284,54 @@ print(response.content)
 ## API Endpoints
 
 Once running, the following endpoints are available:
+
+### POST `/v1/messages`
+
+Anthropic-compatible messages endpoint. Works with the Anthropic SDK and Claude Code.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: a" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'
+```
+
+**Request Body:**
+
+- `model` (optional): Model name. The proxy maps this to the best available Copilot model.
+- `messages`: Array of messages with `role` (`user`, `assistant`) and `content`
+- `max_tokens` (required): Maximum tokens to generate
+- `stream` (optional): Set to `true` for streaming responses (SSE format)
+- `tools` (optional): Array of tool definitions (Anthropic format)
+- `tool_choice` (optional): Tool choice configuration
+- `use_vscode_tools` (optional): Include VS Code registered tools
+- `tool_execution` (optional): `"none"` or `"auto"` for auto-execute mode
+
+**Response:**
+
+```json
+{
+  "id": "msg_abc123",
+  "type": "message",
+  "role": "assistant",
+  "content": [{
+    "type": "text",
+    "text": "Hello! How can I help you today?"
+  }],
+  "model": "copilot-claude-3.5-sonnet",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}
+```
 
 ### POST `/v1/chat/completions`
 

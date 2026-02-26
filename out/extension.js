@@ -1543,6 +1543,7 @@ function getWebviewContent(isRunning, port, models, settings, logs = []) {
                     <thead>
                         <tr>
                             <th>Time</th>
+                            <th>API</th>
                             <th>Model</th>
                             <th>Msgs</th>
                             <th>In</th>
@@ -1557,9 +1558,12 @@ function getWebviewContent(isRunning, port, models, settings, logs = []) {
         const time = new Date(entry.timestamp).toLocaleTimeString();
         const statusClass = entry.status === 'success' ? 'status-success' : 'status-error';
         const statusIcon = entry.status === 'success' ? '✓' : '✗';
+        const apiType = entry.endpoint.includes('messages') ? 'Anthropic' : 'OpenAI';
+        const apiClass = apiType === 'Anthropic' ? 'api-anthropic' : 'api-openai';
         return `
                                 <tr class="${statusClass}">
                                     <td class="log-time">${(0, core_1.escapeHtml)(time)}</td>
+                                    <td class="log-api"><span class="api-badge ${apiClass}">${apiType}</span></td>
                                     <td class="log-model" title="${(0, core_1.escapeHtml)(entry.model)}">${(0, core_1.escapeHtml)(entry.model.split('/').pop() || entry.model)}</td>
                                     <td class="log-num">${entry.messageCount}</td>
                                     <td class="log-num">${entry.inputChars.toLocaleString()}</td>
@@ -1909,6 +1913,24 @@ function getWebviewContent(isRunning, port, models, settings, logs = []) {
         .logs-table .log-num {
             text-align: right;
             font-family: var(--vscode-editor-font-family);
+        }
+        .logs-table .log-api {
+            white-space: nowrap;
+        }
+        .api-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: 600;
+        }
+        .api-badge.api-openai {
+            background: rgba(16, 163, 127, 0.2);
+            color: #10a37f;
+        }
+        .api-badge.api-anthropic {
+            background: rgba(204, 120, 50, 0.2);
+            color: #cc783a;
         }
         .logs-table .log-stream {
             text-align: center;
