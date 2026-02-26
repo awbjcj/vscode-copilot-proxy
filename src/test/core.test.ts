@@ -31,7 +31,17 @@ import {
     createOpenAIResponseWithTools,
     createStreamChunkWithTools,
     filterToolsByTags,
-    filterToolsByName
+    filterToolsByName,
+    // Anthropic
+    AnthropicRequest,
+    AnthropicContentBlock,
+    generateAnthropicId,
+    parseAnthropicRequestBody,
+    validateAnthropicRequest,
+    convertAnthropicToInternal,
+    convertAnthropicToolsToInternal,
+    createAnthropicResponse,
+    createAnthropicErrorResponse,
 } from '../core';
 
 describe('Core Utilities', () => {
@@ -866,6 +876,256 @@ describe('Core Utilities', () => {
         it('should return empty for no matches', () => {
             const result = filterToolsByName(tools, 'nonexistent');
             expect(result).to.have.length(0);
+        });
+    });
+});
+
+// ============================================================================
+// Anthropic Messages API Tests
+// ============================================================================
+
+describe('Anthropic API Utilities', () => {
+
+    describe('generateAnthropicId', () => {
+        it('should start with msg_', () => {
+            const id = generateAnthropicId();
+            expect(id).to.match(/^msg_/);
+        });
+
+        it('should generate unique IDs', () => {
+            const ids = new Set<string>();
+            for (let i = 0; i < 100; i++) {
+                ids.add(generateAnthropicId());
+            }
+            expect(ids.size).to.equal(100);
+        });
+    });
+
+    describe('parseAnthropicRequestBody', () => {
+        it('should parse valid JSON', () => {
+            const body = JSON.stringify({
+                model: 'claude-3-opus',
+                messages: [{ role: 'user', content: 'Hello' }],
+                max_tokens: 1024
+            });
+            const result = parseAnthropicRequestBody(body);
+            expect(result).to.not.be.null;
+            expect(result!.max_tokens).to.equal(1024);
+        });
+
+        it('should return null for invalid JSON', () => {
+            const result = parseAnthropicRequestBody('not json');
+            expect(result).to.be.null;
+        });
+    });
+
+    describe('validateAnthropicRequest', () => {
+        it('should accept valid request', () => {
+            const request: AnthropicRequest = {
+                messages: [{ role: 'user', content: 'Hello' }],
+                max_tokens: 1024
+            };
+            expect(validateAnthropicRequest(request)).to.be.null;
+        });
+
+        it('should reject missing messages', () => {
+            const result = validateAnthropicRequest({ max_tokens: 1024 } as AnthropicRequest);
+            expect(result).to.contain('messages');
+        });
+
+        it('should reject empty messages', () => {
+            const result = validateAnthropicRequest({ messages: [], max_tokens: 1024 });
+            expect(result).to.contain('empty');
+        });
+
+        it('should reject missing max_tokens', () => {
+            const result = validateAnthropicRequest({
+                messages: [{ role: 'user', content: 'Hello' }]
+            } as AnthropicRequest);
+            expect(result).to.contain('max_tokens');
+        });
+
+        it('should reject invalid max_tokens', () => {
+            const result = validateAnthropicRequest({
+                messages: [{ role: 'user', content: 'Hello' }],
+                max_tokens: -1
+            });
+            expect(result).to.contain('max_tokens');
+        });
+
+        it('should reject system role in messages', () => {
+            const result = validateAnthropicRequest({
+                messages: [{ role: 'system' as 'user', content: 'Hello' }],
+                max_tokens: 1024
+            });
+            expect(result).to.contain('role');
+        });
+
+        it('should accept request with tools', () => {
+            const request: AnthropicRequest = {
+                messages: [{ role: 'user', content: 'Hello' }],
+                max_tokens: 1024,
+                tools: [{ name: 'get_weather', input_schema: { type: 'object' } }]
+            };
+            expect(validateAnthropicRequest(request)).to.be.null;
+        });
+    });
+
+    describe('convertAnthropicToInternal', () => {
+        it('should convert simple string messages', () => {
+            const request: AnthropicRequest = {
+                messages: [
+                    { role: 'user', content: 'Hello' },
+                    { role: 'assistant', content: 'Hi there' }
+                ],
+                max_tokens: 1024
+            };
+            const result = convertAnthropicToInternal(request);
+            expect(result).to.have.length(2);
+            expect(result[0].role).to.equal('user');
+            expect(result[0].content).to.equal('Hello');
+            expect(result[1].role).to.equal('assistant');
+            expect(result[1].content).to.equal('Hi there');
+        });
+
+        it('should extract system message from top-level', () => {
+            const request: AnthropicRequest = {
+                system: 'You are helpful',
+                messages: [{ role: 'user', content: 'Hello' }],
+                max_tokens: 1024
+            };
+            const result = convertAnthropicToInternal(request);
+            expect(result).to.have.length(2);
+            expect(result[0].role).to.equal('system');
+            expect(result[0].content).to.equal('You are helpful');
+            expect(result[1].role).to.equal('user');
+        });
+
+        it('should convert content block arrays', () => {
+            const request: AnthropicRequest = {
+                messages: [{
+                    role: 'user',
+                    content: [{ type: 'text', text: 'Hello world' }]
+                }],
+                max_tokens: 1024
+            };
+            const result = convertAnthropicToInternal(request);
+            expect(result).to.have.length(1);
+            expect(result[0].content).to.equal('Hello world');
+        });
+
+        it('should convert tool_use blocks to tool_calls', () => {
+            const request: AnthropicRequest = {
+                messages: [{
+                    role: 'assistant',
+                    content: [
+                        { type: 'text', text: 'Let me check' },
+                        { type: 'tool_use', id: 'call_1', name: 'get_weather', input: { city: 'NYC' } }
+                    ]
+                }],
+                max_tokens: 1024
+            };
+            const result = convertAnthropicToInternal(request);
+            expect(result).to.have.length(1);
+            expect(result[0].role).to.equal('assistant');
+            expect(result[0].content).to.equal('Let me check');
+            expect(result[0].tool_calls).to.have.length(1);
+            expect(result[0].tool_calls![0].function.name).to.equal('get_weather');
+            expect(result[0].tool_calls![0].id).to.equal('call_1');
+        });
+
+        it('should convert tool_result blocks to tool messages', () => {
+            const request: AnthropicRequest = {
+                messages: [{
+                    role: 'user',
+                    content: [
+                        { type: 'tool_result', tool_use_id: 'call_1', content: 'Sunny, 72F' }
+                    ]
+                }],
+                max_tokens: 1024
+            };
+            const result = convertAnthropicToInternal(request);
+            expect(result).to.have.length(1);
+            expect(result[0].role).to.equal('tool');
+            expect(result[0].content).to.equal('Sunny, 72F');
+            expect(result[0].tool_call_id).to.equal('call_1');
+        });
+
+        it('should handle system as content block array', () => {
+            const request: AnthropicRequest = {
+                system: [{ type: 'text', text: 'Be helpful' }] as AnthropicContentBlock[],
+                messages: [{ role: 'user', content: 'Hi' }],
+                max_tokens: 1024
+            };
+            const result = convertAnthropicToInternal(request);
+            expect(result).to.have.length(2);
+            expect(result[0].role).to.equal('system');
+            expect(result[0].content).to.equal('Be helpful');
+        });
+    });
+
+    describe('convertAnthropicToolsToInternal', () => {
+        it('should convert Anthropic tools to OpenAI format', () => {
+            const tools = [
+                { name: 'get_weather', description: 'Get weather', input_schema: { type: 'object', properties: { city: { type: 'string' } } } }
+            ];
+            const result = convertAnthropicToolsToInternal(tools);
+            expect(result).to.have.length(1);
+            expect(result[0].type).to.equal('function');
+            expect(result[0].function.name).to.equal('get_weather');
+            expect(result[0].function.description).to.equal('Get weather');
+            expect(result[0].function.parameters).to.deep.equal({ type: 'object', properties: { city: { type: 'string' } } });
+        });
+    });
+
+    describe('createAnthropicResponse', () => {
+        it('should create text-only response', () => {
+            const resp = createAnthropicResponse('msg_1', 'claude-3', 'Hello!');
+            expect(resp.id).to.equal('msg_1');
+            expect(resp.type).to.equal('message');
+            expect(resp.role).to.equal('assistant');
+            expect(resp.stop_reason).to.equal('end_turn');
+            expect(resp.content).to.have.length(1);
+            expect(resp.content[0].type).to.equal('text');
+            expect((resp.content[0] as { type: 'text'; text: string }).text).to.equal('Hello!');
+        });
+
+        it('should create response with tool calls', () => {
+            const toolCalls: ToolCall[] = [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'get_weather', arguments: '{"city":"NYC"}' }
+            }];
+            const resp = createAnthropicResponse('msg_2', 'claude-3', 'Let me check', toolCalls);
+            expect(resp.stop_reason).to.equal('tool_use');
+            expect(resp.content).to.have.length(2);
+            expect(resp.content[0].type).to.equal('text');
+            expect(resp.content[1].type).to.equal('tool_use');
+            const toolUse = resp.content[1] as { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> };
+            expect(toolUse.name).to.equal('get_weather');
+            expect(toolUse.input).to.deep.equal({ city: 'NYC' });
+        });
+
+        it('should handle empty content with tool calls', () => {
+            const toolCalls: ToolCall[] = [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'search', arguments: '{"q":"test"}' }
+            }];
+            const resp = createAnthropicResponse('msg_3', 'claude-3', '', toolCalls);
+            expect(resp.stop_reason).to.equal('tool_use');
+            // Empty content string should not produce a text block
+            expect(resp.content).to.have.length(1);
+            expect(resp.content[0].type).to.equal('tool_use');
+        });
+    });
+
+    describe('createAnthropicErrorResponse', () => {
+        it('should create error response', () => {
+            const resp = createAnthropicErrorResponse('Something went wrong', 'api_error');
+            expect(resp.type).to.equal('error');
+            expect(resp.error.type).to.equal('api_error');
+            expect(resp.error.message).to.equal('Something went wrong');
         });
     });
 });

@@ -46,7 +46,8 @@
       "Bash(py -c:*)",
       "Bash(xargs:*)",
       "Bash(gh release edit:*)",
-      "Bash(py examples/vscode_llm_list_tools.py --tags vscode_codesearch)"
+      "Bash(py examples/vscode_llm_list_tools.py --tags vscode_codesearch)",
+      "WebFetch(domain:developers.googleblog.com)"
     ]
   }
 }

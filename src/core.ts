@@ -159,6 +159,85 @@ export interface ChatMessage {
     name?: string; // Tool name for tool role messages
 }
 
+// ============================================================================
+// Anthropic Messages API Types
+// @see https://docs.anthropic.com/en/api/messages
+// ============================================================================
+
+/**
+ * Anthropic content block - text or tool use/result.
+ */
+export type AnthropicContentBlock =
+    | { type: 'text'; text: string }
+    | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+    | { type: 'tool_result'; tool_use_id: string; content: string | AnthropicContentBlock[] };
+
+/**
+ * Anthropic message in a conversation.
+ */
+export interface AnthropicMessage {
+    role: 'user' | 'assistant';
+    content: string | AnthropicContentBlock[];
+}
+
+/**
+ * Anthropic tool definition.
+ */
+export interface AnthropicTool {
+    name: string;
+    description?: string;
+    input_schema: Record<string, unknown>;
+}
+
+/**
+ * Anthropic Messages API request.
+ */
+export interface AnthropicRequest {
+    model?: string;
+    messages: AnthropicMessage[];
+    system?: string | AnthropicContentBlock[];
+    max_tokens: number;
+    stream?: boolean;
+    temperature?: number;
+    top_p?: number;
+    tools?: AnthropicTool[];
+    tool_choice?: { type: 'auto' | 'any' | 'tool'; name?: string };
+    // Proxy-specific options
+    use_vscode_tools?: boolean;
+    tool_execution?: 'none' | 'auto';
+    max_tool_rounds?: number;
+}
+
+/**
+ * Anthropic Messages API response.
+ */
+export interface AnthropicResponse {
+    id: string;
+    type: 'message';
+    role: 'assistant';
+    content: AnthropicContentBlock[];
+    model: string;
+    stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | null;
+    stop_sequence: string | null;
+    usage: {
+        input_tokens: number;
+        output_tokens: number;
+    };
+}
+
+/**
+ * Anthropic streaming event types.
+ */
+export type AnthropicStreamEvent =
+    | { type: 'message_start'; message: AnthropicResponse }
+    | { type: 'content_block_start'; index: number; content_block: AnthropicContentBlock }
+    | { type: 'content_block_delta'; index: number; delta: { type: 'text_delta'; text: string } | { type: 'input_json_delta'; partial_json: string } }
+    | { type: 'content_block_stop'; index: number }
+    | { type: 'message_delta'; delta: { stop_reason: string }; usage: { output_tokens: number } }
+    | { type: 'message_stop' }
+    | { type: 'ping' }
+    | { type: 'error'; error: { type: string; message: string } };
+
 /**
  * Tool choice options for chat completions.
  */
@@ -739,4 +818,247 @@ export function filterToolsByName(tools: ToolInfo[], pattern: string): ToolInfo[
         .replace(/\*/g, '.*'); // Convert * to .*
     const regex = new RegExp(`^${regexPattern}$`, 'i');
     return tools.filter(tool => regex.test(tool.name));
+}
+
+// ============================================================================
+// Anthropic Messages API Helper Functions
+// ============================================================================
+
+/**
+ * Generates a unique message ID for Anthropic responses.
+ */
+export function generateAnthropicId(): string {
+    return 'msg_' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 6);
+}
+
+/**
+ * Parses an Anthropic request body safely.
+ */
+export function parseAnthropicRequestBody(body: string): AnthropicRequest | null {
+    try {
+        return JSON.parse(body) as AnthropicRequest;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Validates an Anthropic Messages API request.
+ */
+export function validateAnthropicRequest(request: AnthropicRequest): string | null {
+    if (!request.messages || !Array.isArray(request.messages)) {
+        return 'messages is required and must be an array';
+    }
+    if (request.messages.length === 0) {
+        return 'messages array cannot be empty';
+    }
+    if (request.max_tokens === undefined || request.max_tokens === null) {
+        return 'max_tokens is required';
+    }
+    if (typeof request.max_tokens !== 'number' || request.max_tokens < 1) {
+        return 'max_tokens must be a positive integer';
+    }
+    for (let i = 0; i < request.messages.length; i++) {
+        const msg = request.messages[i];
+        if (!msg.role || !['user', 'assistant'].includes(msg.role)) {
+            return `messages[${i}].role must be one of: user, assistant`;
+        }
+        // content can be string or array of content blocks
+        if (msg.content === null || msg.content === undefined) {
+            return `messages[${i}].content is required`;
+        }
+    }
+    // Validate tools if present
+    if (request.tools !== undefined) {
+        if (!Array.isArray(request.tools)) {
+            return 'tools must be an array';
+        }
+        for (let i = 0; i < request.tools.length; i++) {
+            const tool = request.tools[i];
+            if (!tool.name || typeof tool.name !== 'string') {
+                return `tools[${i}].name must be a non-empty string`;
+            }
+            if (tool.input_schema !== undefined && typeof tool.input_schema !== 'object') {
+                return `tools[${i}].input_schema must be an object`;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Converts Anthropic messages to the internal ChatMessage format.
+ * Extracts system message from top-level field.
+ */
+export function convertAnthropicToInternal(request: AnthropicRequest): ChatMessage[] {
+    const messages: ChatMessage[] = [];
+
+    // Convert system to a user message (VS Code LM API has no system role)
+    if (request.system) {
+        const systemText = typeof request.system === 'string'
+            ? request.system
+            : request.system
+                .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                .map(b => b.text)
+                .join('\n');
+        if (systemText) {
+            messages.push({ role: 'system', content: systemText });
+        }
+    }
+
+    // Convert each Anthropic message
+    for (const msg of request.messages) {
+        if (typeof msg.content === 'string') {
+            messages.push({
+                role: msg.role,
+                content: msg.content
+            });
+        } else if (Array.isArray(msg.content)) {
+            if (msg.role === 'assistant') {
+                // Check for tool_use blocks
+                const textParts = msg.content
+                    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                    .map(b => b.text)
+                    .join('');
+                const toolUseParts = msg.content
+                    .filter((b): b is { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => b.type === 'tool_use');
+
+                if (toolUseParts.length > 0) {
+                    messages.push({
+                        role: 'assistant',
+                        content: textParts || null,
+                        tool_calls: toolUseParts.map(t => ({
+                            id: t.id,
+                            type: 'function' as const,
+                            function: {
+                                name: t.name,
+                                arguments: JSON.stringify(t.input)
+                            }
+                        }))
+                    });
+                } else {
+                    messages.push({
+                        role: 'assistant',
+                        content: textParts
+                    });
+                }
+            } else {
+                // User message - may contain text and tool_result blocks
+                const toolResults = msg.content
+                    .filter((b): b is { type: 'tool_result'; tool_use_id: string; content: string | AnthropicContentBlock[] } => b.type === 'tool_result');
+                const textParts = msg.content
+                    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                    .map(b => b.text)
+                    .join('');
+
+                if (toolResults.length > 0) {
+                    // Add tool result messages
+                    for (const tr of toolResults) {
+                        const resultContent = typeof tr.content === 'string'
+                            ? tr.content
+                            : (tr.content || [])
+                                .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                                .map(b => b.text)
+                                .join('');
+                        messages.push({
+                            role: 'tool',
+                            content: resultContent,
+                            tool_call_id: tr.tool_use_id
+                        });
+                    }
+                    // If there's also text, add as user message
+                    if (textParts) {
+                        messages.push({ role: 'user', content: textParts });
+                    }
+                } else {
+                    messages.push({
+                        role: 'user',
+                        content: textParts
+                    });
+                }
+            }
+        }
+    }
+
+    return messages;
+}
+
+/**
+ * Converts Anthropic tool definitions to OpenAI tool format (internal).
+ */
+export function convertAnthropicToolsToInternal(tools: AnthropicTool[]): Tool[] {
+    return tools.map(t => ({
+        type: 'function' as const,
+        function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.input_schema
+        }
+    }));
+}
+
+/**
+ * Creates an Anthropic Messages API response.
+ */
+export function createAnthropicResponse(
+    id: string,
+    model: string,
+    content: string,
+    toolCalls?: ToolCall[],
+    _created?: number
+): AnthropicResponse {
+    const contentBlocks: AnthropicContentBlock[] = [];
+
+    if (content) {
+        contentBlocks.push({ type: 'text', text: content });
+    }
+
+    if (toolCalls && toolCalls.length > 0) {
+        for (const tc of toolCalls) {
+            let input: Record<string, unknown> = {};
+            try {
+                input = JSON.parse(tc.function.arguments);
+            } catch {
+                // keep empty
+            }
+            contentBlocks.push({
+                type: 'tool_use',
+                id: tc.id,
+                name: tc.function.name,
+                input
+            });
+        }
+    }
+
+    const hasToolUse = toolCalls && toolCalls.length > 0;
+
+    return {
+        id,
+        type: 'message',
+        role: 'assistant',
+        content: contentBlocks,
+        model,
+        stop_reason: hasToolUse ? 'tool_use' : 'end_turn',
+        stop_sequence: null,
+        usage: {
+            input_tokens: 0,
+            output_tokens: 0
+        }
+    };
+}
+
+/**
+ * Creates an Anthropic error response.
+ */
+export function createAnthropicErrorResponse(
+    message: string,
+    type: string
+): { type: 'error'; error: { type: string; message: string } } {
+    return {
+        type: 'error',
+        error: {
+            type,
+            message
+        }
+    };
 }

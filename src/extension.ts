@@ -24,6 +24,8 @@ import {
     ToolCallDelta,
     ToolInfo,
     ToolsResponse,
+    AnthropicResponse,
+    AnthropicStreamEvent,
     MAX_REQUEST_BODY_SIZE,
     REQUEST_TIMEOUT_MS,
     KEEP_ALIVE_TIMEOUT_MS,
@@ -39,10 +41,17 @@ import {
     createStreamChunkWithTools,
     generateId,
     generateToolCallId,
+    generateAnthropicId,
     escapeHtml,
     findBestModel,
     filterToolsByTags,
-    filterToolsByName
+    filterToolsByName,
+    parseAnthropicRequestBody,
+    validateAnthropicRequest,
+    convertAnthropicToInternal,
+    convertAnthropicToolsToInternal,
+    createAnthropicResponse,
+    createAnthropicErrorResponse
 } from './core';
 
 let server: http.Server | null = null;
@@ -979,6 +988,468 @@ async function handleChatCompletion(req: http.IncomingMessage, res: http.ServerR
     });
 }
 
+// ============================================================================
+// Anthropic Messages API Handler
+// ============================================================================
+
+/**
+ * Sends a standardized Anthropic error response.
+ */
+function sendAnthropicErrorResponse(
+    res: http.ServerResponse,
+    statusCode: number,
+    message: string,
+    type: string
+): void {
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(createAnthropicErrorResponse(message, type)));
+}
+
+/**
+ * Converts Anthropic tool definitions to VS Code tool format for merging.
+ */
+async function mergeAnthropicWithVSCodeTools(
+    requestTools: import('./core').AnthropicTool[] | undefined,
+    useVSCodeTools: boolean
+): Promise<Tool[]> {
+    const tools: Tool[] = requestTools ? convertAnthropicToolsToInternal(requestTools) : [];
+
+    if (useVSCodeTools) {
+        const vsCodeTools = await getAvailableTools();
+        const existingNames = new Set(tools.map(t => t.function.name));
+
+        for (const vsTool of vsCodeTools) {
+            if (!existingNames.has(vsTool.name)) {
+                tools.push({
+                    type: 'function',
+                    function: {
+                        name: vsTool.name,
+                        description: vsTool.description,
+                        parameters: vsTool.inputSchema
+                    }
+                });
+            }
+        }
+    }
+
+    return tools;
+}
+
+/**
+ * Writes an Anthropic SSE event.
+ */
+function writeAnthropicSSE(res: http.ServerResponse, event: AnthropicStreamEvent): void {
+    res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+}
+
+async function handleAnthropicMessages(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body = '';
+    let bodySize = 0;
+    let aborted = false;
+    const startTime = Date.now();
+
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+        if (!aborted) {
+            aborted = true;
+            logError(`Anthropic request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+            sendAnthropicErrorResponse(res, 408, 'Request timeout', 'timeout_error');
+            req.destroy();
+        }
+    });
+
+    req.on('data', chunk => {
+        bodySize += chunk.length;
+        if (bodySize > MAX_REQUEST_BODY_SIZE) {
+            aborted = true;
+            logError(`Anthropic request body too large: ${bodySize} bytes`);
+            sendAnthropicErrorResponse(res, 413, 'Request body too large', 'invalid_request_error');
+            req.destroy();
+            return;
+        }
+        body += chunk.toString();
+    });
+
+    req.on('end', async () => {
+        if (aborted) return;
+        try {
+            const parsed = parseAnthropicRequestBody(body);
+            if (!parsed) {
+                logError('Invalid JSON in Anthropic request body');
+                sendAnthropicErrorResponse(res, 400, 'Invalid JSON in request body', 'invalid_request_error');
+                return;
+            }
+
+            const validationError = validateAnthropicRequest(parsed);
+            if (validationError) {
+                logError(`Anthropic request validation failed: ${validationError}`);
+                sendAnthropicErrorResponse(res, 400, validationError, 'invalid_request_error');
+                return;
+            }
+
+            const request = parsed;
+            const requestId = generateAnthropicId();
+
+            logRaw('ANTHROPIC REQUEST', JSON.stringify(request, null, 2));
+
+            const model = await getModel(request.model);
+
+            // Convert Anthropic messages to internal format
+            const internalMessages = convertAnthropicToInternal(request);
+            const messageCount = internalMessages.length;
+            const totalChars = internalMessages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+            const estimatedTokens = Math.ceil(totalChars / 4);
+
+            const requestedModel = request.model || '(default)';
+
+            if (!model) {
+                logError(`No language models available for Anthropic request (requested: ${requestedModel})`);
+                sendAnthropicErrorResponse(res, 503, 'No language models available. Make sure GitHub Copilot is installed and authenticated.', 'api_error');
+                return;
+            }
+
+            // Prepare tools
+            const allTools = await mergeAnthropicWithVSCodeTools(request.tools, request.use_vscode_tools ?? false);
+            const hasTools = allTools.length > 0;
+
+            log(`Anthropic request: ${messageCount} msgs, ~${estimatedTokens} tokens, stream: ${request.stream ?? false}${hasTools ? `, ${allTools.length} tools` : ''}`, 'request');
+            log(`Model: ${requestedModel} → ${model.name} (${model.id})`, 'model');
+
+            const vsCodeMessages = convertToVSCodeMessages(internalMessages);
+
+            // Create cancellation token
+            const timeoutMs = 300000;
+            const cancellationSource = new vscode.CancellationTokenSource();
+            const timeoutId = setTimeout(() => cancellationSource.cancel(), timeoutMs);
+
+            // Build request options
+            const options: vscode.LanguageModelChatRequestOptions = {};
+            if (hasTools) {
+                options.tools = convertToVSCodeTools(allTools);
+                if (request.tool_choice?.type === 'any') {
+                    options.toolMode = vscode.LanguageModelChatToolMode.Required;
+                }
+            }
+
+            // Handle auto-execute mode
+            if (request.tool_execution === 'auto' && hasTools) {
+                log('Anthropic auto-execute mode enabled', 'tool');
+                try {
+                    const maxRounds = request.max_tool_rounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+                    const result = await runAutoExecuteLoop(
+                        model,
+                        vsCodeMessages,
+                        options,
+                        maxRounds,
+                        cancellationSource.token
+                    );
+
+                    log(`Anthropic auto-execute response: ~${result.content.length} chars, ${result.toolCallsExecuted} tool call(s)`);
+                    logRaw('ANTHROPIC RESPONSE (auto-execute)', result.content);
+
+                    const anthropicResponse = createAnthropicResponse(requestId, model.id, result.content);
+
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Connection': 'close',
+                        ...getCorsHeaders(req.headers.origin)
+                    });
+                    res.end(JSON.stringify(anthropicResponse));
+
+                    addRequestLog({
+                        id: requestId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint: '/v1/messages',
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: result.content.length,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'success'
+                    });
+                } catch (error) {
+                    const durationMs = Date.now() - startTime;
+                    logError(`Anthropic auto-execute failed after ${durationMs}ms`, error);
+                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    sendAnthropicErrorResponse(res, 500, errorMessage, 'api_error');
+
+                    addRequestLog({
+                        id: requestId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint: '/v1/messages',
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: 0,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'error',
+                        errorMessage
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                    cancellationSource.dispose();
+                }
+                return;
+            }
+
+            if (request.stream) {
+                // Anthropic streaming response
+                res.writeHead(200, {
+                    'Content-Type': 'text/event-stream',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    ...getCorsHeaders(req.headers.origin)
+                });
+
+                try {
+                    const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
+
+                    // Send message_start event
+                    const initialMessage: AnthropicResponse = {
+                        id: requestId,
+                        type: 'message',
+                        role: 'assistant',
+                        content: [],
+                        model: model.id,
+                        stop_reason: null,
+                        stop_sequence: null,
+                        usage: { input_tokens: 0, output_tokens: 0 }
+                    };
+                    writeAnthropicSSE(res, { type: 'message_start', message: initialMessage });
+
+                    // Send ping
+                    writeAnthropicSSE(res, { type: 'ping' });
+
+                    let responseChars = 0;
+                    let fullResponse = '';
+                    const toolCalls: ToolCall[] = [];
+                    let contentBlockIndex = 0;
+                    let textBlockStarted = false;
+
+                    const stream = response.stream || (async function* () {
+                        for await (const text of response.text) {
+                            yield new vscode.LanguageModelTextPart(text);
+                        }
+                    })();
+
+                    for await (const part of stream) {
+                        if (part instanceof vscode.LanguageModelTextPart) {
+                            const text = part.value;
+                            responseChars += text.length;
+                            fullResponse += text;
+
+                            // Start text content block if not started
+                            if (!textBlockStarted) {
+                                writeAnthropicSSE(res, {
+                                    type: 'content_block_start',
+                                    index: contentBlockIndex,
+                                    content_block: { type: 'text', text: '' }
+                                });
+                                textBlockStarted = true;
+                            }
+
+                            // Send text delta
+                            writeAnthropicSSE(res, {
+                                type: 'content_block_delta',
+                                index: contentBlockIndex,
+                                delta: { type: 'text_delta', text }
+                            });
+                        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+                            // Close text block if open
+                            if (textBlockStarted) {
+                                writeAnthropicSSE(res, { type: 'content_block_stop', index: contentBlockIndex });
+                                contentBlockIndex++;
+                                textBlockStarted = false;
+                            }
+
+                            const toolCall = convertToolCallPart(part);
+                            toolCalls.push(toolCall);
+
+                            let input: Record<string, unknown> = {};
+                            try {
+                                input = JSON.parse(toolCall.function.arguments);
+                            } catch {
+                                // keep empty
+                            }
+
+                            // Send tool_use content block
+                            writeAnthropicSSE(res, {
+                                type: 'content_block_start',
+                                index: contentBlockIndex,
+                                content_block: {
+                                    type: 'tool_use',
+                                    id: toolCall.id,
+                                    name: toolCall.function.name,
+                                    input: {}
+                                }
+                            });
+
+                            // Send input as json delta
+                            writeAnthropicSSE(res, {
+                                type: 'content_block_delta',
+                                index: contentBlockIndex,
+                                delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) }
+                            });
+
+                            writeAnthropicSSE(res, { type: 'content_block_stop', index: contentBlockIndex });
+                            contentBlockIndex++;
+
+                            log(`Anthropic tool call: ${toolCall.function.name}(${toolCall.function.arguments})`, 'tool');
+                        }
+                    }
+
+                    // Close text block if still open
+                    if (textBlockStarted) {
+                        writeAnthropicSSE(res, { type: 'content_block_stop', index: contentBlockIndex });
+                    }
+
+                    // Send message_delta with stop_reason
+                    const stopReason = toolCalls.length > 0 ? 'tool_use' : 'end_turn';
+                    writeAnthropicSSE(res, {
+                        type: 'message_delta',
+                        delta: { stop_reason: stopReason },
+                        usage: { output_tokens: Math.ceil(responseChars / 4) }
+                    });
+
+                    // Send message_stop
+                    writeAnthropicSSE(res, { type: 'message_stop' });
+                    res.end();
+
+                    const responseTokens = Math.ceil(responseChars / 4);
+                    const toolInfo = toolCalls.length > 0 ? `, ${toolCalls.length} tool call(s)` : '';
+                    log(`Anthropic response (stream): ~${responseChars} chars (~${responseTokens} tokens)${toolInfo}`, 'stream');
+                    logRaw('ANTHROPIC RESPONSE (stream)', fullResponse);
+
+                    addRequestLog({
+                        id: requestId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint: '/v1/messages',
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: responseChars,
+                        stream: true,
+                        durationMs: Date.now() - startTime,
+                        status: 'success'
+                    });
+                } catch (error) {
+                    const durationMs = Date.now() - startTime;
+                    logError(`Anthropic streaming failed after ${durationMs}ms`, error);
+                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    writeAnthropicSSE(res, { type: 'error', error: { type: 'api_error', message: errorMessage } });
+                    res.end();
+
+                    addRequestLog({
+                        id: requestId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint: '/v1/messages',
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: 0,
+                        stream: true,
+                        durationMs: Date.now() - startTime,
+                        status: 'error',
+                        errorMessage
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                    cancellationSource.dispose();
+                }
+            } else {
+                // Non-streaming Anthropic response
+                try {
+                    const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
+
+                    let content = '';
+                    const toolCalls: ToolCall[] = [];
+
+                    const stream = response.stream || (async function* () {
+                        for await (const text of response.text) {
+                            yield new vscode.LanguageModelTextPart(text);
+                        }
+                    })();
+
+                    for await (const part of stream) {
+                        if (part instanceof vscode.LanguageModelTextPart) {
+                            content += part.value;
+                        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+                            const toolCall = convertToolCallPart(part);
+                            toolCalls.push(toolCall);
+                            log(`Anthropic tool call: ${toolCall.function.name}(${toolCall.function.arguments})`, 'tool');
+                        }
+                    }
+
+                    const responseTokens = Math.ceil(content.length / 4);
+                    const toolInfo = toolCalls.length > 0 ? `, ${toolCalls.length} tool call(s)` : '';
+                    log(`Anthropic response: ~${content.length} chars (~${responseTokens} tokens)${toolInfo}`, 'response');
+                    logRaw('ANTHROPIC RESPONSE', content);
+
+                    const anthropicResponse = createAnthropicResponse(
+                        requestId,
+                        model.id,
+                        content,
+                        toolCalls.length > 0 ? toolCalls : undefined
+                    );
+
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Connection': 'close',
+                        ...getCorsHeaders(req.headers.origin)
+                    });
+                    res.end(JSON.stringify(anthropicResponse));
+
+                    addRequestLog({
+                        id: requestId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint: '/v1/messages',
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: content.length,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'success'
+                    });
+                } catch (error) {
+                    const durationMs = Date.now() - startTime;
+                    logError(`Anthropic non-streaming failed after ${durationMs}ms`, error);
+                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    sendAnthropicErrorResponse(res, 500, errorMessage, 'api_error');
+
+                    addRequestLog({
+                        id: requestId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint: '/v1/messages',
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: 0,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'error',
+                        errorMessage
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                    cancellationSource.dispose();
+                }
+            }
+        } catch (error) {
+            logError('Invalid Anthropic request', error);
+            const errorMessage = error instanceof Error ? error.message : 'Invalid JSON';
+            sendAnthropicErrorResponse(res, 400, errorMessage, 'invalid_request_error');
+        }
+    });
+}
+
 async function handleModels(res: http.ServerResponse, corsHeaders: Record<string, string>): Promise<void> {
     // Only refresh if cache is stale (TTL expired) or empty
     const cacheAge = Date.now() - modelsLastRefreshed;
@@ -1054,6 +1525,8 @@ function createServer(_port: number): http.Server {
 
         if (req.method === 'POST' && (urlPath === '/v1/chat/completions' || urlPath === '/chat/completions')) {
             await handleChatCompletion(req, res);
+        } else if (req.method === 'POST' && (urlPath === '/v1/messages' || urlPath === '/messages')) {
+            await handleAnthropicMessages(req, res);
         } else if (req.method === 'GET' && (urlPath === '/v1/models' || urlPath === '/models')) {
             await handleModels(res, corsHeaders);
         } else if (req.method === 'GET' && (urlPath === '/v1/tools' || urlPath === '/tools')) {
@@ -1099,6 +1572,7 @@ async function startServer(): Promise<void> {
     server.listen(port, '127.0.0.1', async () => {
         log(`Server running on 127.0.0.1:${port}`, 'success');
         log(`Endpoint: http://127.0.0.1:${port}/v1/chat/completions`, 'info');
+        log(`Endpoint: http://127.0.0.1:${port}/v1/messages (Anthropic)`, 'info');
 
         // Log available models after server starts
         const models = await refreshModels();
@@ -1182,6 +1656,16 @@ function getWebviewContent(isRunning: boolean, port: number, models: ModelInfo[]
                     <span class="method post">POST</span>
                     <code>http://127.0.0.1:${port}/v1/chat/completions</code>
                     <button class="copy-btn" data-url="http://127.0.0.1:${port}/v1/chat/completions" title="Copy URL">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="endpoint">
+                    <span class="method post">POST</span>
+                    <code>http://127.0.0.1:${port}/v1/messages</code>
+                    <button class="copy-btn" data-url="http://127.0.0.1:${port}/v1/messages" title="Copy URL">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
