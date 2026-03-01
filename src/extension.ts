@@ -51,7 +51,8 @@ import {
     convertAnthropicToInternal,
     convertAnthropicToolsToInternal,
     createAnthropicResponse,
-    createAnthropicErrorResponse
+    createAnthropicErrorResponse,
+    getTextContent
 } from './core';
 
 let server: http.Server | null = null;
@@ -460,10 +461,11 @@ function convertToVSCodeMessages(messages: ChatMessage[]): vscode.LanguageModelC
     }
 
     return messages.map(msg => {
+        const text = getTextContent(msg.content);
         switch (msg.role) {
             case 'system':
                 // VS Code LM API doesn't have a system role - convert to user message
-                return vscode.LanguageModelChatMessage.User(msg.content || '');
+                return vscode.LanguageModelChatMessage.User(text);
 
             case 'assistant':
                 // Handle assistant messages with tool calls
@@ -471,8 +473,8 @@ function convertToVSCodeMessages(messages: ChatMessage[]): vscode.LanguageModelC
                     // Create message parts: text content (if any) + tool call parts
                     const parts: (vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart)[] = [];
 
-                    if (msg.content) {
-                        parts.push(new vscode.LanguageModelTextPart(msg.content));
+                    if (text) {
+                        parts.push(new vscode.LanguageModelTextPart(text));
                     }
 
                     for (const toolCall of msg.tool_calls) {
@@ -491,7 +493,7 @@ function convertToVSCodeMessages(messages: ChatMessage[]): vscode.LanguageModelC
 
                     return vscode.LanguageModelChatMessage.Assistant(parts);
                 }
-                return vscode.LanguageModelChatMessage.Assistant(msg.content || '');
+                return vscode.LanguageModelChatMessage.Assistant(text);
 
             case 'tool':
                 // Tool result messages - VS Code expects these as user messages with ToolResultPart
@@ -499,16 +501,16 @@ function convertToVSCodeMessages(messages: ChatMessage[]): vscode.LanguageModelC
                     return vscode.LanguageModelChatMessage.User([
                         new vscode.LanguageModelToolResultPart(
                             msg.tool_call_id,
-                            [new vscode.LanguageModelTextPart(msg.content || '')]
+                            [new vscode.LanguageModelTextPart(text)]
                         )
                     ]);
                 }
                 // Fallback if no tool_call_id (shouldn't happen if validation works)
-                return vscode.LanguageModelChatMessage.User(msg.content || '');
+                return vscode.LanguageModelChatMessage.User(text);
 
             case 'user':
             default:
-                return vscode.LanguageModelChatMessage.User(msg.content || '');
+                return vscode.LanguageModelChatMessage.User(text);
         }
     });
 }
@@ -569,7 +571,7 @@ async function handleChatCompletion(req: http.IncomingMessage, res: http.ServerR
 
             // Calculate context size
             const messageCount = request.messages.length;
-            const totalChars = request.messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+            const totalChars = request.messages.reduce((sum, m) => sum + getTextContent(m.content).length, 0);
             const estimatedTokens = Math.ceil(totalChars / 4); // rough estimate: ~4 chars per token
 
             const requestedModel = request.model || '(default)';
@@ -1096,7 +1098,7 @@ async function handleAnthropicMessages(req: http.IncomingMessage, res: http.Serv
             // Convert Anthropic messages to internal format
             const internalMessages = convertAnthropicToInternal(request);
             const messageCount = internalMessages.length;
-            const totalChars = internalMessages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+            const totalChars = internalMessages.reduce((sum, m) => sum + getTextContent(m.content).length, 0);
             const estimatedTokens = Math.ceil(totalChars / 4);
 
             const requestedModel = request.model || '(default)';

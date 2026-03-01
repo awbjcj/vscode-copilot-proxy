@@ -149,14 +149,41 @@ export interface ToolsResponse {
 // Chat Message Types
 // ============================================================================
 
+/**
+ * OpenAI content part (multimodal format).
+ * @see https://platform.openai.com/docs/api-reference/chat/create#chat-create-messages
+ */
+export interface ContentPart {
+    type: 'text' | 'image_url';
+    text?: string;
+    image_url?: { url: string; detail?: string };
+}
+
 export interface ChatMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
-    content: string | null;
+    content: string | ContentPart[] | null;
     // For assistant messages with tool calls
     tool_calls?: ToolCall[];
     // For tool result messages
     tool_call_id?: string;
     name?: string; // Tool name for tool role messages
+}
+
+/**
+ * Extracts text from message content, flattening array content parts to a string.
+ * Image parts are skipped since VS Code LM API doesn't support them.
+ */
+export function getTextContent(content: string | ContentPart[] | null | undefined): string {
+    if (content == null) {
+        return '';
+    }
+    if (typeof content === 'string') {
+        return content;
+    }
+    return content
+        .filter((part): part is ContentPart & { type: 'text' } => part.type === 'text' && typeof part.text === 'string')
+        .map(part => part.text)
+        .join('\n');
 }
 
 // ============================================================================
@@ -613,9 +640,17 @@ export function validateRequest(request: ChatCompletionRequest): string | null {
         if (!msg.role || !['system', 'user', 'assistant', 'tool'].includes(msg.role)) {
             return `messages[${i}].role must be one of: system, user, assistant, tool`;
         }
-        // content can be null for assistant messages with tool_calls
-        if (msg.content !== null && typeof msg.content !== 'string') {
-            return `messages[${i}].content must be a string or null`;
+        // content can be null, a string, or an array of content parts
+        if (msg.content !== null && typeof msg.content !== 'string' && !Array.isArray(msg.content)) {
+            return `messages[${i}].content must be a string, array of content parts, or null`;
+        }
+        if (Array.isArray(msg.content)) {
+            for (let j = 0; j < msg.content.length; j++) {
+                const part = msg.content[j];
+                if (!part.type || !['text', 'image_url'].includes(part.type)) {
+                    return `messages[${i}].content[${j}].type must be 'text' or 'image_url'`;
+                }
+            }
         }
         // Validate tool role messages
         if (msg.role === 'tool') {
