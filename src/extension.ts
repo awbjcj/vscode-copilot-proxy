@@ -1468,6 +1468,9 @@ async function handleModels(res: http.ServerResponse, corsHeaders: Record<string
         permission: [],
         root: model.id,
         parent: null,
+        // Context length fields for OpenAI-compatible clients
+        context_length: model.maxInputTokens,
+        context_window: model.maxInputTokens,
         // Additional metadata
         name: model.name,
         family: model.family,
