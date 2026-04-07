@@ -13,6 +13,10 @@ Perfect for developers who want to use Copilot's models in custom workflows, aut
 </p>
 
 <p align="center">
+  <img src="images/RequestLogs.png" alt="Request Logs" width="600">
+</p>
+
+<p align="center">
   <img src="images/RequestLogs-Stats.png" alt="Request Logs and Stats" width="600">
 </p>
 

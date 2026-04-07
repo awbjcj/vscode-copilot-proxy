@@ -49,6 +49,7 @@ const vscode = __importStar(require("vscode"));
 const http = __importStar(require("http"));
 const core_1 = require("./core");
 let server = null;
+const activeSockets = new Set();
 let statusBarItem;
 let outputChannel;
 let statusPanel;
@@ -399,17 +400,18 @@ function convertToVSCodeMessages(messages) {
         logWarn(`${systemMessageCount} system message(s) converted to user role (VS Code LM API limitation)`);
     }
     return messages.map(msg => {
+        const text = (0, core_1.getTextContent)(msg.content);
         switch (msg.role) {
             case 'system':
                 // VS Code LM API doesn't have a system role - convert to user message
-                return vscode.LanguageModelChatMessage.User(msg.content || '');
+                return vscode.LanguageModelChatMessage.User(text);
             case 'assistant':
                 // Handle assistant messages with tool calls
                 if (msg.tool_calls && msg.tool_calls.length > 0) {
                     // Create message parts: text content (if any) + tool call parts
                     const parts = [];
-                    if (msg.content) {
-                        parts.push(new vscode.LanguageModelTextPart(msg.content));
+                    if (text) {
+                        parts.push(new vscode.LanguageModelTextPart(text));
                     }
                     for (const toolCall of msg.tool_calls) {
                         let input = {};
@@ -423,19 +425,19 @@ function convertToVSCodeMessages(messages) {
                     }
                     return vscode.LanguageModelChatMessage.Assistant(parts);
                 }
-                return vscode.LanguageModelChatMessage.Assistant(msg.content || '');
+                return vscode.LanguageModelChatMessage.Assistant(text);
             case 'tool':
                 // Tool result messages - VS Code expects these as user messages with ToolResultPart
                 if (msg.tool_call_id) {
                     return vscode.LanguageModelChatMessage.User([
-                        new vscode.LanguageModelToolResultPart(msg.tool_call_id, [new vscode.LanguageModelTextPart(msg.content || '')])
+                        new vscode.LanguageModelToolResultPart(msg.tool_call_id, [new vscode.LanguageModelTextPart(text)])
                     ]);
                 }
                 // Fallback if no tool_call_id (shouldn't happen if validation works)
-                return vscode.LanguageModelChatMessage.User(msg.content || '');
+                return vscode.LanguageModelChatMessage.User(text);
             case 'user':
             default:
-                return vscode.LanguageModelChatMessage.User(msg.content || '');
+                return vscode.LanguageModelChatMessage.User(text);
         }
     });
 }
@@ -488,7 +490,7 @@ async function handleChatCompletion(req, res) {
             const model = await getModel(request.model);
             // Calculate context size
             const messageCount = request.messages.length;
-            const totalChars = request.messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+            const totalChars = request.messages.reduce((sum, m) => sum + (0, core_1.getTextContent)(m.content).length, 0);
             const estimatedTokens = Math.ceil(totalChars / 4); // rough estimate: ~4 chars per token
             const requestedModel = request.model || '(default)';
             if (!model) {
@@ -502,10 +504,11 @@ async function handleChatCompletion(req, res) {
             log(`Request: ${messageCount} msgs, ~${estimatedTokens} tokens, stream: ${request.stream ?? false}${hasTools ? `, ${allTools.length} tools` : ''}`, 'request');
             log(`Model: ${requestedModel} → ${model.name} (${model.id})`, 'model');
             const vsCodeMessages = convertToVSCodeMessages(request.messages);
-            // Create cancellation token with timeout (5 min default)
-            const timeoutMs = 300000;
+            // Create cancellation token with timeout
+            // Non-streaming/auto-execute: absolute 5-min deadline
+            // Streaming: replaced below with activity-based inactivity timeout
             const cancellationSource = new vscode.CancellationTokenSource();
-            const timeoutId = setTimeout(() => cancellationSource.cancel(), timeoutMs);
+            let timeoutId = setTimeout(() => cancellationSource.cancel(), core_1.REQUEST_TIMEOUT_MS);
             // Build request options with tools if provided
             const options = {};
             if (hasTools) {
@@ -603,6 +606,17 @@ async function handleChatCompletion(req, res) {
                     'Connection': 'keep-alive',
                     ...(0, core_1.getCorsHeaders)(req.headers.origin)
                 });
+                // Replace absolute deadline with activity-based inactivity timeout
+                clearTimeout(timeoutId);
+                const resetStreamTimeout = () => {
+                    clearTimeout(timeoutId);
+                    timeoutId = setTimeout(() => cancellationSource.cancel(), core_1.STREAM_INACTIVITY_TIMEOUT_MS);
+                };
+                resetStreamTimeout();
+                // Cancel model request when client disconnects
+                res.on('close', () => cancellationSource.cancel());
+                // Disable socket-level timeout for long-running streams
+                req.socket?.setTimeout(0);
                 const id = (0, core_1.generateId)();
                 const created = Math.floor(Date.now() / 1000);
                 try {
@@ -633,6 +647,7 @@ async function handleChatCompletion(req, res) {
                         }
                     })();
                     for await (const part of stream) {
+                        resetStreamTimeout();
                         if (part instanceof vscode.LanguageModelTextPart) {
                             // Regular text content
                             const text = part.value;
@@ -958,7 +973,7 @@ async function handleAnthropicMessages(req, res) {
             // Convert Anthropic messages to internal format
             const internalMessages = (0, core_1.convertAnthropicToInternal)(request);
             const messageCount = internalMessages.length;
-            const totalChars = internalMessages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+            const totalChars = internalMessages.reduce((sum, m) => sum + (0, core_1.getTextContent)(m.content).length, 0);
             const estimatedTokens = Math.ceil(totalChars / 4);
             const requestedModel = request.model || '(default)';
             if (!model) {
@@ -972,10 +987,11 @@ async function handleAnthropicMessages(req, res) {
             log(`Anthropic request: ${messageCount} msgs, ~${estimatedTokens} tokens, stream: ${request.stream ?? false}${hasTools ? `, ${allTools.length} tools` : ''}`, 'request');
             log(`Model: ${requestedModel} → ${model.name} (${model.id})`, 'model');
             const vsCodeMessages = convertToVSCodeMessages(internalMessages);
-            // Create cancellation token
-            const timeoutMs = 300000;
+            // Create cancellation token with timeout
+            // Non-streaming/auto-execute: absolute 5-min deadline
+            // Streaming: replaced below with activity-based inactivity timeout
             const cancellationSource = new vscode.CancellationTokenSource();
-            const timeoutId = setTimeout(() => cancellationSource.cancel(), timeoutMs);
+            let timeoutId = setTimeout(() => cancellationSource.cancel(), core_1.REQUEST_TIMEOUT_MS);
             // Build request options
             const options = {};
             if (hasTools) {
@@ -1047,6 +1063,17 @@ async function handleAnthropicMessages(req, res) {
                     'Connection': 'keep-alive',
                     ...(0, core_1.getCorsHeaders)(req.headers.origin)
                 });
+                // Replace absolute deadline with activity-based inactivity timeout
+                clearTimeout(timeoutId);
+                const resetStreamTimeout = () => {
+                    clearTimeout(timeoutId);
+                    timeoutId = setTimeout(() => cancellationSource.cancel(), core_1.STREAM_INACTIVITY_TIMEOUT_MS);
+                };
+                resetStreamTimeout();
+                // Cancel model request when client disconnects
+                res.on('close', () => cancellationSource.cancel());
+                // Disable socket-level timeout for long-running streams
+                req.socket?.setTimeout(0);
                 try {
                     const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
                     // Send message_start event
@@ -1074,6 +1101,7 @@ async function handleAnthropicMessages(req, res) {
                         }
                     })();
                     for await (const part of stream) {
+                        resetStreamTimeout();
                         if (part instanceof vscode.LanguageModelTextPart) {
                             const text = part.value;
                             responseChars += text.length;
@@ -1287,6 +1315,9 @@ async function handleModels(res, corsHeaders) {
         permission: [],
         root: model.id,
         parent: null,
+        // Context length fields for OpenAI-compatible clients
+        context_length: model.maxInputTokens,
+        context_window: model.maxInputTokens,
         // Additional metadata
         name: model.name,
         family: model.family,
@@ -1365,17 +1396,19 @@ async function startServer() {
     log(`Binding to port ${port}...`, 'server');
     server = createServer(port);
     // Configure server-level timeouts
-    server.timeout = core_1.REQUEST_TIMEOUT_MS;
+    // server.timeout = 0: disable server-level socket timeout.
+    // Timeouts are managed per-request: absolute deadline for non-streaming,
+    // activity-based inactivity timeout for streaming responses.
+    server.timeout = 0;
     server.keepAliveTimeout = core_1.KEEP_ALIVE_TIMEOUT_MS;
     server.headersTimeout = core_1.HEADERS_TIMEOUT_MS;
-    // Track active connections for debugging
-    let connectionCount = 0;
+    // Track active connections for clean shutdown
     server.on('connection', (socket) => {
-        connectionCount++;
-        log(`New connection (${connectionCount} active)`, 'connect');
+        activeSockets.add(socket);
+        log(`New connection (${activeSockets.size} active)`, 'connect');
         socket.on('close', () => {
-            connectionCount--;
-            log(`Connection closed (${connectionCount} active)`, 'disconnect');
+            activeSockets.delete(socket);
+            log(`Connection closed (${activeSockets.size} active)`, 'disconnect');
         });
     });
     server.listen(port, '127.0.0.1', async () => {
@@ -1409,6 +1442,11 @@ async function startServer() {
 }
 function stopServer() {
     if (server) {
+        // Destroy all active sockets so server.close() resolves immediately
+        for (const socket of activeSockets) {
+            socket.destroy();
+        }
+        activeSockets.clear();
         server.close(() => {
             log('Server stopped', 'server');
             vscode.window.showInformationMessage('Copilot Proxy server stopped');
@@ -2226,6 +2264,10 @@ function activate(context) {
 }
 function deactivate() {
     if (server) {
+        for (const socket of activeSockets) {
+            socket.destroy();
+        }
+        activeSockets.clear();
         server.close();
         server = null;
     }

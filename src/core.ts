@@ -16,10 +16,18 @@ export const MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024;
 
 /**
  * Request timeout in milliseconds (5 minutes).
+ * Absolute deadline for non-streaming requests and auto-execute.
  * Must be long enough for large LLM requests (60K+ tokens).
- * Matches the model cancellation timeout in extension.ts.
  */
 export const REQUEST_TIMEOUT_MS = 300000;
+
+/**
+ * Stream inactivity timeout in milliseconds (5 minutes).
+ * For streaming responses, this resets on each chunk received from the model.
+ * Unlike REQUEST_TIMEOUT_MS (absolute deadline), this only fires if
+ * no data flows for the full duration - so long-running streams survive.
+ */
+export const STREAM_INACTIVITY_TIMEOUT_MS = 300000;
 
 /**
  * Server keep-alive timeout in milliseconds (65 seconds).
