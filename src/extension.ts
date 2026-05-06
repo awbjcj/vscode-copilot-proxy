@@ -1761,11 +1761,19 @@ function getWebviewContent(isRunning: boolean, port: number, models: ModelInfo[]
     ` : '';
 
     const fmtAvg = (s: StatsCounters) => s.total > 0 ? `${Math.round(s.durationMsSum / s.total)}ms` : '-';
-    const statsRow = (label: string, sVal: string | number, lVal: string | number, errorCol = false) => `
-        <tr${errorCol ? ' class="stats-error-row"' : ''}>
+    const statsRow = (label: string, sVal: string | number, lVal: string | number) => `
+        <tr>
             <td class="stats-label">${escapeHtml(label)}</td>
             <td class="stats-value">${typeof sVal === 'number' ? sVal.toLocaleString() : escapeHtml(sVal)}</td>
             <td class="stats-value">${typeof lVal === 'number' ? lVal.toLocaleString() : escapeHtml(lVal)}</td>
+        </tr>
+    `;
+    const errorCell = (n: number) => `<td class="stats-value${n > 0 ? ' stats-error-cell' : ''}">${n.toLocaleString()}</td>`;
+    const errorsRow = `
+        <tr>
+            <td class="stats-label">Errors</td>
+            ${errorCell(session.error)}
+            ${errorCell(lifetime.error)}
         </tr>
     `;
     const statsSection = `
@@ -1782,7 +1790,7 @@ function getWebviewContent(isRunning: boolean, port: number, models: ModelInfo[]
                 <tbody>
                     ${statsRow('Total requests', session.total, lifetime.total)}
                     ${statsRow('Successful', session.success, lifetime.success)}
-                    ${statsRow('Errors', session.error, lifetime.error, true)}
+                    ${errorsRow}
                     ${statsRow('OpenAI API', session.openai, lifetime.openai)}
                     ${statsRow('Anthropic API', session.anthropic, lifetime.anthropic)}
                     ${statsRow('Input chars', session.inputChars, lifetime.inputChars)}
@@ -2113,7 +2121,7 @@ function getWebviewContent(isRunning: boolean, port: number, models: ModelInfo[]
             font-family: var(--vscode-editor-font-family);
             color: var(--vscode-foreground);
         }
-        .stats-table tr.stats-error-row .stats-value {
+        .stats-table .stats-error-cell {
             color: #f44336;
         }
         .settings-grid {
