@@ -22,12 +22,12 @@ export const MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024;
 export const REQUEST_TIMEOUT_MS = 300000;
 
 /**
- * Stream inactivity timeout in milliseconds (5 minutes).
+ * Stream inactivity timeout in milliseconds (30 minutes).
  * For streaming responses, this resets on each chunk received from the model.
  * Unlike REQUEST_TIMEOUT_MS (absolute deadline), this only fires if
  * no data flows for the full duration - so long-running streams survive.
  */
-export const STREAM_INACTIVITY_TIMEOUT_MS = 300000;
+export const STREAM_INACTIVITY_TIMEOUT_MS = 1800000;
 
 /**
  * Server keep-alive timeout in milliseconds (65 seconds).
@@ -363,6 +363,47 @@ export interface RequestLogEntry {
     durationMs: number;
     status: 'success' | 'error';
     errorMessage?: string;
+}
+
+export interface StatsCounters {
+    total: number;
+    success: number;
+    error: number;
+    openai: number;
+    anthropic: number;
+    inputChars: number;
+    outputChars: number;
+    durationMsSum: number;
+}
+
+export function emptyStats(): StatsCounters {
+    return {
+        total: 0,
+        success: 0,
+        error: 0,
+        openai: 0,
+        anthropic: 0,
+        inputChars: 0,
+        outputChars: 0,
+        durationMsSum: 0
+    };
+}
+
+export function applyStatsEntry(stats: StatsCounters, entry: RequestLogEntry): void {
+    stats.total += 1;
+    if (entry.status === 'success') {
+        stats.success += 1;
+    } else {
+        stats.error += 1;
+    }
+    if (entry.endpoint.includes('messages')) {
+        stats.anthropic += 1;
+    } else {
+        stats.openai += 1;
+    }
+    stats.inputChars += entry.inputChars;
+    stats.outputChars += entry.outputChars;
+    stats.durationMsSum += entry.durationMs;
 }
 
 /**

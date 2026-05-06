@@ -8,6 +8,7 @@ A comprehensive catalog of all features in the VS Code Copilot Proxy extension.
 
 | Date | Feature | Description |
 |------|---------|-------------|
+| 2026-05-05 | Stats Section | Session and lifetime request stats (totals, errors, API split, chars, avg duration) shown in webview below Endpoints; lifetime persists in globalState |
 | 2025-12-20 | Knowledge Management | Documentation organization and feature discovery system |
 | 2025-12-20 | Tool Calling | OpenAI-compatible function/tool calling support (planned) |
 

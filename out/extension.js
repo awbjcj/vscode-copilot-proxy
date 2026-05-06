@@ -72,12 +72,23 @@ const LOG_SYMBOLS = {
 // Request logs storage (max 50 entries)
 const MAX_REQUEST_LOGS = 50;
 let requestLogs = [];
+// Stats counters: session resets on activate; lifetime persists in globalState.
+const LIFETIME_STATS_KEY = 'copilotProxy.lifetimeStats';
+let extensionContext;
+const sessionStats = (0, core_1.emptyStats)();
+let lifetimeStats = (0, core_1.emptyStats)();
+function persistLifetimeStats() {
+    extensionContext?.globalState.update(LIFETIME_STATS_KEY, lifetimeStats);
+}
 function addRequestLog(entry) {
     // Always collect logs
     requestLogs.unshift(entry);
     if (requestLogs.length > MAX_REQUEST_LOGS) {
         requestLogs = requestLogs.slice(0, MAX_REQUEST_LOGS);
     }
+    (0, core_1.applyStatsEntry)(sessionStats, entry);
+    (0, core_1.applyStatsEntry)(lifetimeStats, entry);
+    persistLifetimeStats();
     // Always update panel if open (UI decides whether to display logs based on setting)
     if (statusPanel) {
         updateStatusPanel();
@@ -615,7 +626,8 @@ async function handleChatCompletion(req, res) {
                 resetStreamTimeout();
                 // Cancel model request when client disconnects
                 res.on('close', () => cancellationSource.cancel());
-                // Disable socket-level timeout for long-running streams
+                // Disable socket-level timeout and its destroy callback for long-running streams
+                req.setTimeout(0);
                 req.socket?.setTimeout(0);
                 const id = (0, core_1.generateId)();
                 const created = Math.floor(Date.now() / 1000);
@@ -1072,7 +1084,8 @@ async function handleAnthropicMessages(req, res) {
                 resetStreamTimeout();
                 // Cancel model request when client disconnects
                 res.on('close', () => cancellationSource.cancel());
-                // Disable socket-level timeout for long-running streams
+                // Disable socket-level timeout and its destroy callback for long-running streams
+                req.setTimeout(0);
                 req.socket?.setTimeout(0);
                 try {
                     const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
@@ -1471,7 +1484,7 @@ function updateStatusBar(port) {
         statusBarItem.tooltip = 'Copilot Proxy is not running\nClick to show status';
     }
 }
-function getWebviewContent(isRunning, port, models, settings, logs = []) {
+function getWebviewContent(isRunning, port, models, settings, logs = [], session = (0, core_1.emptyStats)(), lifetime = (0, core_1.emptyStats)()) {
     const statusColor = isRunning ? '#4caf50' : '#9e9e9e';
     const statusText = isRunning ? `Running on 127.0.0.1:${port}` : 'Stopped';
     const buttonText = isRunning ? 'Stop Server' : 'Start Server';
@@ -1538,6 +1551,38 @@ function getWebviewContent(isRunning, port, models, settings, logs = []) {
             </div>
         </div>
     ` : '';
+    const fmtAvg = (s) => s.total > 0 ? `${Math.round(s.durationMsSum / s.total)}ms` : '-';
+    const statsRow = (label, sVal, lVal, errorCol = false) => `
+        <tr${errorCol ? ' class="stats-error-row"' : ''}>
+            <td class="stats-label">${(0, core_1.escapeHtml)(label)}</td>
+            <td class="stats-value">${typeof sVal === 'number' ? sVal.toLocaleString() : (0, core_1.escapeHtml)(sVal)}</td>
+            <td class="stats-value">${typeof lVal === 'number' ? lVal.toLocaleString() : (0, core_1.escapeHtml)(lVal)}</td>
+        </tr>
+    `;
+    const statsSection = `
+        <div class="section">
+            <div class="section-header">Stats</div>
+            <table class="stats-table">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>Session</th>
+                        <th>Lifetime</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${statsRow('Total requests', session.total, lifetime.total)}
+                    ${statsRow('Successful', session.success, lifetime.success)}
+                    ${statsRow('Errors', session.error, lifetime.error, true)}
+                    ${statsRow('OpenAI API', session.openai, lifetime.openai)}
+                    ${statsRow('Anthropic API', session.anthropic, lifetime.anthropic)}
+                    ${statsRow('Input chars', session.inputChars, lifetime.inputChars)}
+                    ${statsRow('Output chars', session.outputChars, lifetime.outputChars)}
+                    ${statsRow('Avg duration', fmtAvg(session), fmtAvg(lifetime))}
+                </tbody>
+            </table>
+        </div>
+    `;
     const modelOptions = models.map(m => `<option value="${(0, core_1.escapeHtml)(m.id)}" ${settings?.defaultModel === m.id ? 'selected' : ''}>${(0, core_1.escapeHtml)(m.name)}</option>`).join('');
     const settingsSection = settings ? `
         <div class="section">
@@ -1826,6 +1871,36 @@ function getWebviewContent(isRunning, port, models, settings, logs = []) {
             padding: 24px;
             color: var(--vscode-descriptionForeground);
         }
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .stats-table th,
+        .stats-table td {
+            padding: 6px 12px;
+            text-align: right;
+            font-size: 0.9em;
+        }
+        .stats-table th {
+            font-weight: 600;
+            color: var(--vscode-descriptionForeground);
+            border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.2));
+        }
+        .stats-table th:first-child,
+        .stats-table .stats-label {
+            text-align: left;
+            color: var(--vscode-descriptionForeground);
+        }
+        .stats-table .stats-value {
+            font-family: var(--vscode-editor-font-family);
+            color: var(--vscode-foreground);
+        }
+        .stats-table tr.stats-error-row .stats-value {
+            color: #f44336;
+        }
         .settings-grid {
             display: flex;
             flex-direction: column;
@@ -2027,6 +2102,8 @@ function getWebviewContent(isRunning, port, models, settings, logs = []) {
                 </div>
 
                 ${endpoints}
+
+                ${statsSection}
             </div>
         </div>
 
@@ -2220,9 +2297,15 @@ function updateStatusPanel() {
         logRequestsToUI,
         rawLogging
     };
-    statusPanel.webview.html = getWebviewContent(isRunning, port, models, settings, logRequestsToUI ? requestLogs : []);
+    statusPanel.webview.html = getWebviewContent(isRunning, port, models, settings, logRequestsToUI ? requestLogs : [], sessionStats, lifetimeStats);
 }
 function activate(context) {
+    extensionContext = context;
+    // Restore lifetime stats from globalState (merge into seed shape so new fields default to 0)
+    const stored = context.globalState.get(LIFETIME_STATS_KEY);
+    if (stored) {
+        lifetimeStats = { ...(0, core_1.emptyStats)(), ...stored };
+    }
     // Create log output channel (supports colored log levels)
     outputChannel = vscode.window.createOutputChannel('Copilot Proxy', { log: true });
     context.subscriptions.push(outputChannel);
