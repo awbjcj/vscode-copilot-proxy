@@ -159,8 +159,117 @@ async function refreshModels() {
         isRefreshing = false;
     }
 }
+/**
+ * Error thrown when Copilot's session/handles are stale and a retry could not
+ * recover. Surfaced to clients as 503 with a hint to open Copilot Chat once.
+ */
+class CopilotNotReadyError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'CopilotNotReadyError';
+    }
+}
+/**
+ * Heuristic: does this error look like a stale Copilot session (vs a real
+ * validation/content error)? Triggers the one-shot refresh-and-retry.
+ */
+function isLikelyStaleSessionError(error) {
+    if (error instanceof vscode.LanguageModelError) {
+        // Most LanguageModelError causes (NoPermissions, Blocked, Unknown) can
+        // be transient after Copilot's session token rotates. The retry cost is
+        // one extra call; if it's a permanent failure the retry fails the same.
+        return true;
+    }
+    const msg = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+    return /auth|session|token|unauthor|401|403|expired|permission|not\s*ready|copilot/.test(msg);
+}
+/**
+ * Detects the Copilot worker out-of-memory crash. The vscode.lm request runs in
+ * a Node worker thread; an oversized payload exhausts its heap and the thread is
+ * terminated ("Worker terminated due to reaching memory limit: JS heap out of
+ * memory"). This kills the language model subsystem for the rest of the session,
+ * so the only recovery is reducing request size and reloading VS Code.
+ */
+function isCopilotWorkerOOM(error) {
+    const msg = error instanceof Error ? error.message : String(error ?? '');
+    return /worker terminated|memory limit|heap out of memory|out of memory/i.test(msg);
+}
+// Guard so the OOM reload prompt is shown at most once per window session (the
+// flag resets when the extension reactivates after a reload).
+let oomReloadPromptShown = false;
+/**
+ * Shows a one-time notification offering to reload the window after a Copilot
+ * worker OOM, since the language model subsystem stays dead until reload.
+ */
+function notifyCopilotWorkerOOM() {
+    if (oomReloadPromptShown)
+        return;
+    oomReloadPromptShown = true;
+    void vscode.window.showErrorMessage('Copilot Proxy: the language model worker ran out of memory and is now unavailable. Reduce request size; reload the window to recover.', 'Reload Window').then(choice => {
+        if (choice === 'Reload Window') {
+            void vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+    });
+}
+/**
+ * Maps an error to a client-facing message. For the Copilot worker OOM, rewrites
+ * the opaque worker error into actionable guidance and prompts a window reload;
+ * otherwise returns the raw message unchanged.
+ */
+function describeRequestError(error) {
+    const raw = error instanceof Error ? error.message : String(error ?? 'Unknown error');
+    if (isCopilotWorkerOOM(error)) {
+        notifyCopilotWorkerOOM();
+        return `Request too large: Copilot's model worker ran out of memory (${raw}). Reduce the request size - trim conversation history, context, or tool definitions. The VS Code language model may need a window reload to recover.`;
+    }
+    return raw;
+}
+/**
+ * Calls model.sendRequest with one retry on stale-session errors. On retry,
+ * forces refreshModels() and re-resolves the model handle against the current
+ * Copilot session.
+ *
+ * Returns the (possibly newly-resolved) model alongside the response so callers
+ * can use the live handle for logging/stream iteration.
+ */
+async function sendRequestWithRetry(initialModel, requestedModelName, messages, options, token) {
+    try {
+        const response = await initialModel.sendRequest(messages, options, token);
+        return { response, model: initialModel };
+    }
+    catch (error) {
+        // Don't retry if the client/timeout already cancelled - the second
+        // attempt would fail immediately on the same already-cancelled token.
+        if (token.isCancellationRequested) {
+            throw error;
+        }
+        if (!isLikelyStaleSessionError(error)) {
+            throw error;
+        }
+        logWarn(`sendRequest failed (likely stale Copilot session): ${error instanceof Error ? error.message : String(error)}. Refreshing models and retrying once.`);
+        // Force a refresh by clearing the timestamp so getModel re-fetches.
+        modelsLastRefreshed = 0;
+        const freshModel = await getModel(requestedModelName);
+        if (!freshModel) {
+            throw new CopilotNotReadyError('Copilot Chat is not ready. Open Copilot Chat once (type a message and stop) then retry.');
+        }
+        try {
+            const response = await freshModel.sendRequest(messages, options, token);
+            log(`sendRequest retry succeeded with refreshed model: ${freshModel.id}`, 'success');
+            return { response, model: freshModel };
+        }
+        catch (retryError) {
+            const retryMsg = retryError instanceof Error ? retryError.message : String(retryError);
+            throw new CopilotNotReadyError(`Copilot session expired or unavailable. Open Copilot Chat once (type a message and stop) then retry. (${retryMsg})`);
+        }
+    }
+}
 async function getModel(requestedModel) {
-    if (cachedModels.length === 0) {
+    // Refresh if cache is empty or older than TTL. Stale handles tied to an
+    // expired Copilot session will hang on sendRequest, so re-resolving against
+    // the current session list before each request keeps idle proxies usable.
+    const cacheAge = Date.now() - modelsLastRefreshed;
+    if (cachedModels.length === 0 || cacheAge > core_1.MODEL_CACHE_TTL_MS) {
         await refreshModels();
     }
     // Get default model from VS Code config if no model specified
@@ -309,15 +418,20 @@ async function executeToolCall(toolCall, cancellationToken) {
  * Runs the auto-execute loop: sends request, executes tool calls, repeats until done.
  * Returns the final response content.
  */
-async function runAutoExecuteLoop(model, initialMessages, options, maxRounds, cancellationToken) {
+async function runAutoExecuteLoop(model, requestedModelName, initialMessages, options, maxRounds, cancellationToken) {
     const messages = [...initialMessages];
     let totalToolCalls = 0;
     let round = 0;
     const unlimited = maxRounds === 0;
+    // Mutable so the retry helper can swap in a refreshed model handle
+    // for subsequent rounds if Copilot's session rotated mid-loop.
+    let currentModel = model;
     while (unlimited || round < maxRounds) {
         round++;
         log(`Auto-execute round ${round}${unlimited ? '' : `/${maxRounds}`}`);
-        const response = await model.sendRequest(messages, options, cancellationToken);
+        const sendResult = await sendRequestWithRetry(currentModel, requestedModelName, messages, options, cancellationToken);
+        const response = sendResult.response;
+        currentModel = sendResult.model;
         let content = '';
         const toolCalls = [];
         // Process response
@@ -506,7 +620,7 @@ async function handleChatCompletion(req, res) {
             const requestedModel = request.model || '(default)';
             if (!model) {
                 logError(`No language models available (requested: ${requestedModel})`);
-                sendErrorResponse(res, 503, 'No language models available. Make sure GitHub Copilot is installed and authenticated.', 'service_unavailable');
+                sendErrorResponse(res, 503, 'No language models available. Make sure GitHub Copilot is installed and authenticated, then open Copilot Chat once (type a message and stop) and retry.', 'service_unavailable');
                 return;
             }
             // Prepare tools (merge with VS Code tools if use_vscode_tools is enabled)
@@ -537,7 +651,7 @@ async function handleChatCompletion(req, res) {
                 log('Auto-execute mode enabled', 'tool');
                 try {
                     const maxRounds = request.max_tool_rounds ?? core_1.DEFAULT_MAX_TOOL_ROUNDS;
-                    const result = await runAutoExecuteLoop(model, vsCodeMessages, options, maxRounds, cancellationSource.token);
+                    const result = await runAutoExecuteLoop(model, request.model, vsCodeMessages, options, maxRounds, cancellationSource.token);
                     const responseTokens = Math.ceil(result.content.length / 4);
                     log(`Auto-execute response: ~${result.content.length} chars (~${responseTokens} tokens), ${result.toolCallsExecuted} tool call(s) executed`);
                     // Raw logging of response
@@ -586,7 +700,7 @@ async function handleChatCompletion(req, res) {
                 catch (error) {
                     const durationMs = Date.now() - startTime;
                     logError(`Auto-execute failed after ${durationMs}ms`, error);
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    const errorMessage = describeRequestError(error);
                     sendErrorResponse(res, 500, errorMessage, 'server_error');
                     addRequestLog({
                         id: requestId,
@@ -632,7 +746,7 @@ async function handleChatCompletion(req, res) {
                 const id = (0, core_1.generateId)();
                 const created = Math.floor(Date.now() / 1000);
                 try {
-                    const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
+                    const { response } = await sendRequestWithRetry(model, request.model, vsCodeMessages, options, cancellationSource.token);
                     // Send initial chunk with role
                     const initialChunk = {
                         id,
@@ -767,7 +881,7 @@ async function handleChatCompletion(req, res) {
                 catch (error) {
                     const durationMs = Date.now() - startTime;
                     logError(`Streaming request failed after ${durationMs}ms`, error);
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    const errorMessage = describeRequestError(error);
                     const errorStack = error instanceof Error ? error.stack : String(error);
                     logRaw('ERROR (stream)', `${errorMessage}\n\nDuration: ${durationMs}ms\n\nStack:\n${errorStack}`);
                     // Send error in proper SSE format with consistent error structure
@@ -797,7 +911,7 @@ async function handleChatCompletion(req, res) {
             else {
                 // Non-streaming response
                 try {
-                    const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
+                    const { response } = await sendRequestWithRetry(model, request.model, vsCodeMessages, options, cancellationSource.token);
                     let content = '';
                     const toolCalls = [];
                     // Use response.stream if available (for tool calling), otherwise fall back to response.text
@@ -866,10 +980,15 @@ async function handleChatCompletion(req, res) {
                 catch (error) {
                     const durationMs = Date.now() - startTime;
                     logError(`Non-streaming request failed after ${durationMs}ms`, error);
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    const errorMessage = describeRequestError(error);
                     const errorStack = error instanceof Error ? error.stack : String(error);
                     logRaw('ERROR', `${errorMessage}\n\nDuration: ${durationMs}ms\n\nStack:\n${errorStack}`);
-                    sendErrorResponse(res, 500, errorMessage, 'server_error');
+                    if (error instanceof CopilotNotReadyError) {
+                        sendErrorResponse(res, 503, errorMessage, 'service_unavailable');
+                    }
+                    else {
+                        sendErrorResponse(res, 500, errorMessage, 'server_error');
+                    }
                     // Log error to UI
                     addRequestLog({
                         id: requestId,
@@ -990,7 +1109,7 @@ async function handleAnthropicMessages(req, res) {
             const requestedModel = request.model || '(default)';
             if (!model) {
                 logError(`No language models available for Anthropic request (requested: ${requestedModel})`);
-                sendAnthropicErrorResponse(res, 503, 'No language models available. Make sure GitHub Copilot is installed and authenticated.', 'api_error');
+                sendAnthropicErrorResponse(res, 503, 'No language models available. Make sure GitHub Copilot is installed and authenticated, then open Copilot Chat once (type a message and stop) and retry.', 'api_error');
                 return;
             }
             // Prepare tools
@@ -1017,7 +1136,7 @@ async function handleAnthropicMessages(req, res) {
                 log('Anthropic auto-execute mode enabled', 'tool');
                 try {
                     const maxRounds = request.max_tool_rounds ?? core_1.DEFAULT_MAX_TOOL_ROUNDS;
-                    const result = await runAutoExecuteLoop(model, vsCodeMessages, options, maxRounds, cancellationSource.token);
+                    const result = await runAutoExecuteLoop(model, request.model, vsCodeMessages, options, maxRounds, cancellationSource.token);
                     log(`Anthropic auto-execute response: ~${result.content.length} chars, ${result.toolCallsExecuted} tool call(s)`);
                     logRaw('ANTHROPIC RESPONSE (auto-execute)', result.content);
                     const anthropicResponse = (0, core_1.createAnthropicResponse)(requestId, model.id, result.content);
@@ -1044,8 +1163,13 @@ async function handleAnthropicMessages(req, res) {
                 catch (error) {
                     const durationMs = Date.now() - startTime;
                     logError(`Anthropic auto-execute failed after ${durationMs}ms`, error);
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-                    sendAnthropicErrorResponse(res, 500, errorMessage, 'api_error');
+                    const errorMessage = describeRequestError(error);
+                    if (error instanceof CopilotNotReadyError) {
+                        sendAnthropicErrorResponse(res, 503, errorMessage, 'api_error');
+                    }
+                    else {
+                        sendAnthropicErrorResponse(res, 500, errorMessage, 'api_error');
+                    }
                     addRequestLog({
                         id: requestId,
                         timestamp: new Date().toISOString(),
@@ -1088,7 +1212,7 @@ async function handleAnthropicMessages(req, res) {
                 req.setTimeout(0);
                 req.socket?.setTimeout(0);
                 try {
-                    const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
+                    const { response } = await sendRequestWithRetry(model, request.model, vsCodeMessages, options, cancellationSource.token);
                     // Send message_start event
                     const initialMessage = {
                         id: requestId,
@@ -1208,7 +1332,7 @@ async function handleAnthropicMessages(req, res) {
                 catch (error) {
                     const durationMs = Date.now() - startTime;
                     logError(`Anthropic streaming failed after ${durationMs}ms`, error);
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+                    const errorMessage = describeRequestError(error);
                     writeAnthropicSSE(res, { type: 'error', error: { type: 'api_error', message: errorMessage } });
                     res.end();
                     addRequestLog({
@@ -1234,7 +1358,7 @@ async function handleAnthropicMessages(req, res) {
             else {
                 // Non-streaming Anthropic response
                 try {
-                    const response = await model.sendRequest(vsCodeMessages, options, cancellationSource.token);
+                    const { response } = await sendRequestWithRetry(model, request.model, vsCodeMessages, options, cancellationSource.token);
                     let content = '';
                     const toolCalls = [];
                     const stream = response.stream || (async function* () {
@@ -1280,8 +1404,13 @@ async function handleAnthropicMessages(req, res) {
                 catch (error) {
                     const durationMs = Date.now() - startTime;
                     logError(`Anthropic non-streaming failed after ${durationMs}ms`, error);
-                    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-                    sendAnthropicErrorResponse(res, 500, errorMessage, 'api_error');
+                    const errorMessage = describeRequestError(error);
+                    if (error instanceof CopilotNotReadyError) {
+                        sendAnthropicErrorResponse(res, 503, errorMessage, 'api_error');
+                    }
+                    else {
+                        sendAnthropicErrorResponse(res, 500, errorMessage, 'api_error');
+                    }
                     addRequestLog({
                         id: requestId,
                         timestamp: new Date().toISOString(),
@@ -1591,6 +1720,50 @@ function getWebviewContent(isRunning, port, models, settings, logs = [], session
             </table>
         </div>
     `;
+    // Per-model breakdown: union of model keys seen in either session or lifetime,
+    // sorted by lifetime request count (desc) so the busiest models surface first.
+    const fmtModelAvg = (m) => m.total > 0 ? `${Math.round(m.durationMsSum / m.total)}ms` : '-';
+    const modelKeys = Array.from(new Set([
+        ...Object.keys(session.byModel ?? {}),
+        ...Object.keys(lifetime.byModel ?? {})
+    ])).sort((a, b) => {
+        const la = lifetime.byModel?.[a]?.total ?? 0;
+        const lb = lifetime.byModel?.[b]?.total ?? 0;
+        if (lb !== la) {
+            return lb - la;
+        }
+        return a.localeCompare(b);
+    });
+    const modelStatsRows = modelKeys.map(key => {
+        const s = session.byModel?.[key] ?? (0, core_1.emptyModelStats)();
+        const l = lifetime.byModel?.[key] ?? (0, core_1.emptyModelStats)();
+        const reqCell = (m) => `<td class="stats-value">${m.total.toLocaleString()}${m.error > 0 ? ` <span class="stats-error-cell">(${m.error.toLocaleString()} err)</span>` : ''}</td>`;
+        return `
+        <tr>
+            <td class="stats-label" title="${(0, core_1.escapeHtml)(key)}">${(0, core_1.escapeHtml)(key)}</td>
+            ${reqCell(s)}
+            ${reqCell(l)}
+            <td class="stats-value">${fmtModelAvg(l)}</td>
+        </tr>`;
+    }).join('');
+    const modelStatsSection = modelKeys.length > 0 ? `
+        <div class="section">
+            <div class="section-header">Stats by Model</div>
+            <table class="stats-table">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Session</th>
+                        <th>Lifetime</th>
+                        <th>Avg</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${modelStatsRows}
+                </tbody>
+            </table>
+        </div>
+    ` : '';
     const modelOptions = models.map(m => `<option value="${(0, core_1.escapeHtml)(m.id)}" ${settings?.defaultModel === m.id ? 'selected' : ''}>${(0, core_1.escapeHtml)(m.name)}</option>`).join('');
     const settingsSection = settings ? `
         <div class="section">
@@ -2112,6 +2285,8 @@ function getWebviewContent(isRunning, port, models, settings, logs = [], session
                 ${endpoints}
 
                 ${statsSection}
+
+                ${modelStatsSection}
             </div>
         </div>
 

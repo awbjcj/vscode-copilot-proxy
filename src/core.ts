@@ -365,6 +365,15 @@ export interface RequestLogEntry {
     errorMessage?: string;
 }
 
+export interface ModelStats {
+    total: number;
+    success: number;
+    error: number;
+    inputChars: number;
+    outputChars: number;
+    durationMsSum: number;
+}
+
 export interface StatsCounters {
     total: number;
     success: number;
@@ -374,6 +383,18 @@ export interface StatsCounters {
     inputChars: number;
     outputChars: number;
     durationMsSum: number;
+    byModel: Record<string, ModelStats>;
+}
+
+export function emptyModelStats(): ModelStats {
+    return {
+        total: 0,
+        success: 0,
+        error: 0,
+        inputChars: 0,
+        outputChars: 0,
+        durationMsSum: 0
+    };
 }
 
 export function emptyStats(): StatsCounters {
@@ -385,7 +406,8 @@ export function emptyStats(): StatsCounters {
         anthropic: 0,
         inputChars: 0,
         outputChars: 0,
-        durationMsSum: 0
+        durationMsSum: 0,
+        byModel: {}
     };
 }
 
@@ -404,6 +426,21 @@ export function applyStatsEntry(stats: StatsCounters, entry: RequestLogEntry): v
     stats.inputChars += entry.inputChars;
     stats.outputChars += entry.outputChars;
     stats.durationMsSum += entry.durationMs;
+
+    const modelKey = entry.model || 'unknown';
+    if (!stats.byModel) {
+        stats.byModel = {};
+    }
+    const m = stats.byModel[modelKey] ?? (stats.byModel[modelKey] = emptyModelStats());
+    m.total += 1;
+    if (entry.status === 'success') {
+        m.success += 1;
+    } else {
+        m.error += 1;
+    }
+    m.inputChars += entry.inputChars;
+    m.outputChars += entry.outputChars;
+    m.durationMsSum += entry.durationMs;
 }
 
 /**
