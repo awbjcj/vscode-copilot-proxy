@@ -1091,15 +1091,19 @@ async function handleAnthropicMessages(req, res) {
                 sendAnthropicErrorResponse(res, 400, 'Invalid JSON in request body', 'invalid_request_error');
                 return;
             }
+            // Log the raw body before validation so rejected requests are visible
+            logRaw('ANTHROPIC REQUEST', JSON.stringify(parsed, null, 2));
             const validationError = (0, core_1.validateAnthropicRequest)(parsed);
             if (validationError) {
-                logError(`Anthropic request validation failed: ${validationError}`);
+                const roles = Array.isArray(parsed.messages)
+                    ? parsed.messages.map((m) => m?.role ?? '(none)').join(', ')
+                    : '(no messages)';
+                logError(`Anthropic request validation failed: ${validationError} | roles: [${roles}]`);
                 sendAnthropicErrorResponse(res, 400, validationError, 'invalid_request_error');
                 return;
             }
             const request = parsed;
             const requestId = (0, core_1.generateAnthropicId)();
-            logRaw('ANTHROPIC REQUEST', JSON.stringify(request, null, 2));
             const model = await getModel(request.model);
             // Convert Anthropic messages to internal format
             const internalMessages = (0, core_1.convertAnthropicToInternal)(request);

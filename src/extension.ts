@@ -1255,17 +1255,21 @@ async function handleAnthropicMessages(req: http.IncomingMessage, res: http.Serv
                 return;
             }
 
+            // Log the raw body before validation so rejected requests are visible
+            logRaw('ANTHROPIC REQUEST', JSON.stringify(parsed, null, 2));
+
             const validationError = validateAnthropicRequest(parsed);
             if (validationError) {
-                logError(`Anthropic request validation failed: ${validationError}`);
+                const roles = Array.isArray(parsed.messages)
+                    ? parsed.messages.map((m: { role?: string }) => m?.role ?? '(none)').join(', ')
+                    : '(no messages)';
+                logError(`Anthropic request validation failed: ${validationError} | roles: [${roles}]`);
                 sendAnthropicErrorResponse(res, 400, validationError, 'invalid_request_error');
                 return;
             }
 
             const request = parsed;
             const requestId = generateAnthropicId();
-
-            logRaw('ANTHROPIC REQUEST', JSON.stringify(request, null, 2));
 
             const model = await getModel(request.model);
 

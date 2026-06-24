@@ -209,9 +209,14 @@ export type AnthropicContentBlock =
 
 /**
  * Anthropic message in a conversation.
+ *
+ * Per the Anthropic spec the system prompt belongs in the top-level `system`
+ * field, but some clients (e.g. Claude Code) occasionally place a `system`
+ * role inline in the messages array. We accept it and hoist it into a system
+ * message during conversion rather than rejecting the request.
  */
 export interface AnthropicMessage {
-    role: 'user' | 'assistant';
+    role: 'user' | 'assistant' | 'system';
     content: string | AnthropicContentBlock[];
 }
 
@@ -981,8 +986,8 @@ export function validateAnthropicRequest(request: AnthropicRequest): string | nu
     }
     for (let i = 0; i < request.messages.length; i++) {
         const msg = request.messages[i];
-        if (!msg.role || !['user', 'assistant'].includes(msg.role)) {
-            return `messages[${i}].role must be one of: user, assistant`;
+        if (!msg.role || !['user', 'assistant', 'system'].includes(msg.role)) {
+            return `messages[${i}].role must be one of: user, assistant, system`;
         }
         // content can be string or array of content blocks
         if (msg.content === null || msg.content === undefined) {
@@ -1029,6 +1034,23 @@ export function convertAnthropicToInternal(request: AnthropicRequest): ChatMessa
 
     // Convert each Anthropic message
     for (const msg of request.messages) {
+        // Hoist any inline system-role messages into a system message.
+        // (Anthropic puts system in a top-level field, but some clients send
+        // it inline in the messages array.)
+        if (msg.role === 'system') {
+            const systemText = typeof msg.content === 'string'
+                ? msg.content
+                : Array.isArray(msg.content)
+                    ? msg.content
+                        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+                        .map(b => b.text)
+                        .join('\n')
+                    : '';
+            if (systemText) {
+                messages.push({ role: 'system', content: systemText });
+            }
+            continue;
+        }
         if (typeof msg.content === 'string') {
             messages.push({
                 role: msg.role,
