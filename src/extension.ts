@@ -1503,6 +1503,20 @@ async function handleAnthropicMessages(req: http.IncomingMessage, res: http.Serv
                         }
                     }
 
+                    // If Copilot yielded nothing at all (empty stream, which can
+                    // happen right after extensions are updated/reloaded or when a
+                    // response is filtered), emit an empty text block so the message
+                    // is well-formed. Without this the content array stays empty and
+                    // clients surface it as "no response".
+                    if (!textBlockStarted && toolCalls.length === 0) {
+                        writeAnthropicSSE(res, {
+                            type: 'content_block_start',
+                            index: contentBlockIndex,
+                            content_block: { type: 'text', text: '' }
+                        });
+                        textBlockStarted = true;
+                    }
+
                     // Close text block if still open
                     if (textBlockStarted) {
                         writeAnthropicSSE(res, { type: 'content_block_stop', index: contentBlockIndex });

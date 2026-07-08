@@ -1175,6 +1175,14 @@ export function createAnthropicResponse(
 
     const hasToolUse = toolCalls && toolCalls.length > 0;
 
+    // Anthropic messages must always contain at least one content block. When
+    // Copilot returns nothing (empty text and no tool calls) we would otherwise
+    // emit an empty content array, which clients surface as "no response".
+    // Emit an empty text block so the message stays well-formed.
+    if (contentBlocks.length === 0) {
+        contentBlocks.push({ type: 'text', text: '' });
+    }
+
     return {
         id,
         type: 'message',

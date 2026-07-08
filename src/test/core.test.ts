@@ -1118,6 +1118,17 @@ describe('Anthropic API Utilities', () => {
             expect(resp.content).to.have.length(1);
             expect(resp.content[0].type).to.equal('tool_use');
         });
+
+        it('should emit an empty text block when content and tool calls are both empty', () => {
+            // Regression: an empty Copilot response must still yield a well-formed
+            // message with at least one content block, otherwise clients surface it
+            // as "no response".
+            const resp = createAnthropicResponse('msg_4', 'claude-3', '');
+            expect(resp.stop_reason).to.equal('end_turn');
+            expect(resp.content).to.have.length(1);
+            expect(resp.content[0].type).to.equal('text');
+            expect((resp.content[0] as { type: 'text'; text: string }).text).to.equal('');
+        });
     });
 
     describe('createAnthropicErrorResponse', () => {
