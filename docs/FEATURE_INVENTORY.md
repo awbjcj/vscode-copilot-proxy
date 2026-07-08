@@ -6,23 +6,24 @@ A comprehensive catalog of all features in the VS Code Copilot Proxy extension.
 
 ## Recently Added
 
-| Date | Feature | Description |
-|------|---------|-------------|
-| 2026-06-09 | Stats by Model | Per-model session/lifetime request breakdown table in webview, shown under the main Stats section; auto-hidden until per-model data exists |
-| 2026-06-09 | Copilot Resilience | Stale-session retry with model refresh, worker-OOM detection with reload prompt, and model-cache TTL refresh to keep idle proxies usable |
-| 2026-05-05 | Stats Section | Session and lifetime request stats (totals, errors, API split, chars, avg duration) shown in webview below Endpoints; lifetime persists in globalState |
-| 2025-12-20 | Knowledge Management | Documentation organization and feature discovery system |
-| 2025-12-20 | Tool Calling | OpenAI-compatible function/tool calling support (planned) |
+| Date       | Feature                      | Description                                                                                                                                                                                                  |
+| ---------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-07-08 | Anthropic Empty-Response Fix | `/v1/messages` now always returns at least one content block (streaming and non-streaming) when Copilot yields nothing (e.g. right after an extension update), fixing the intermittent "no response" symptom |
+| 2026-06-09 | Stats by Model               | Per-model session/lifetime request breakdown table in webview, shown under the main Stats section; auto-hidden until per-model data exists                                                                   |
+| 2026-06-09 | Copilot Resilience           | Stale-session retry with model refresh, worker-OOM detection with reload prompt, and model-cache TTL refresh to keep idle proxies usable                                                                     |
+| 2026-05-05 | Stats Section                | Session and lifetime request stats (totals, errors, API split, chars, avg duration) shown in webview below Endpoints; lifetime persists in globalState                                                       |
+| 2025-12-20 | Knowledge Management         | Documentation organization and feature discovery system                                                                                                                                                      |
+| 2025-12-20 | Tool Calling                 | OpenAI-compatible function/tool calling support (planned)                                                                                                                                                    |
 
 ---
 
 ## Feature Status Legend
 
-| Status | Description |
-|--------|-------------|
-| Complete | Feature fully implemented and tested |
-| In Progress | Feature partially implemented |
-| Not Started | Feature planned but not yet started |
+| Status      | Description                          |
+| ----------- | ------------------------------------ |
+| Complete    | Feature fully implemented and tested |
+| In Progress | Feature partially implemented        |
+| Not Started | Feature planned but not yet started  |
 
 ---
 
@@ -35,11 +36,11 @@ A comprehensive catalog of all features in the VS Code Copilot Proxy extension.
 
 OpenAI-compatible HTTP API server that proxies requests through VS Code's Language Model API (GitHub Copilot).
 
-| Item | Path |
-|------|------|
+| Item   | Path                                    |
+| ------ | --------------------------------------- |
 | Design | `docs/features/copilot-proxy/design.md` |
-| Tasks | `docs/features/copilot-proxy/TASKS.md` |
-| Source | `src/extension.ts`, `src/core.ts` |
+| Tasks  | `docs/features/copilot-proxy/TASKS.md`  |
+| Source | `src/extension.ts`, `src/core.ts`       |
 
 **Key Files:**
 
@@ -55,10 +56,10 @@ OpenAI-compatible HTTP API server that proxies requests through VS Code's Langua
 
 Rich HTML webview panel for displaying server status, available models, settings, and request logs.
 
-| Item | Path |
-|------|------|
-| Design | `docs/features/webview-status-panel/design.md` |
-| Tasks | `docs/features/webview-status-panel/TASKS.md` |
+| Item   | Path                                                                  |
+| ------ | --------------------------------------------------------------------- |
+| Design | `docs/features/webview-status-panel/design.md`                        |
+| Tasks  | `docs/features/webview-status-panel/TASKS.md`                         |
 | Source | `src/extension.ts` (getWebviewContent, showStatus, updateStatusPanel) |
 
 ---
@@ -70,11 +71,11 @@ Rich HTML webview panel for displaying server status, available models, settings
 
 Refactoring effort to improve code organization, extract shared utilities, and add unit testing.
 
-| Item | Path |
-|------|------|
+| Item   | Path                                           |
+| ------ | ---------------------------------------------- |
 | Design | `docs/features/code-health-refactor/design.md` |
-| Tasks | `docs/features/code-health-refactor/TASKS.md` |
-| Source | `src/core.ts`, `src/test/` |
+| Tasks  | `docs/features/code-health-refactor/TASKS.md`  |
+| Source | `src/core.ts`, `src/test/`                     |
 
 ---
 
@@ -85,11 +86,35 @@ Refactoring effort to improve code organization, extract shared utilities, and a
 
 Security improvements including localhost-only CORS, request size limits, timeouts, and XSS prevention.
 
-| Item | Path |
-|------|------|
-| Design | `docs/features/security-hardening/design.md` |
-| Tasks | `docs/features/security-hardening/TASKS.md` |
+| Item   | Path                                                          |
+| ------ | ------------------------------------------------------------- |
+| Design | `docs/features/security-hardening/design.md`                  |
+| Tasks  | `docs/features/security-hardening/TASKS.md`                   |
 | Source | `src/core.ts` (getCorsHeaders, isLocalhostOrigin, escapeHtml) |
+
+---
+
+### Linux Headless Service
+
+**Status:** Complete
+**Location:** `docs/features/linux-background-service/`
+
+Run the proxy in the background on Linux by launching the full VS Code desktop
+binary under a virtual X display (Xvfb) as a systemd user service. Preserves the
+real extension host so GitHub Copilot (`vscode.lm`) keeps working.
+
+| Item   | Path                                               |
+| ------ | -------------------------------------------------- |
+| Design | `docs/features/linux-background-service/design.md` |
+| Tasks  | `docs/features/linux-background-service/TASKS.md`  |
+| Source | `scripts/linux/`                                   |
+
+**Key Files:**
+
+- `scripts/linux/run-headless.sh` - Xvfb launcher for headless VS Code
+- `scripts/linux/copilot-proxy.service` - systemd user unit template
+- `scripts/linux/install-service.sh` / `uninstall-service.sh` - service management
+- `scripts/linux/README.md` - setup and headless Copilot sign-in guide
 
 ---
 
@@ -102,11 +127,11 @@ Security improvements including localhost-only CORS, request size limits, timeou
 
 OpenAI-compatible function/tool calling support with optional auto-execute mode.
 
-| Item | Path |
-|------|------|
+| Item   | Path                                   |
+| ------ | -------------------------------------- |
 | Design | `docs/features/tool-calling/design.md` |
-| Tasks | `docs/features/tool-calling/TASKS.md` |
-| Source | TBD |
+| Tasks  | `docs/features/tool-calling/TASKS.md`  |
+| Source | TBD                                    |
 
 **Phases:**
 
@@ -128,10 +153,10 @@ OpenAI-compatible function/tool calling support with optional auto-execute mode.
 
 Documentation organization and feature discovery system to prevent duplication and track implementations.
 
-| Item | Path |
-|------|------|
-| Design | `docs/features/knowledge-management/design.md` |
-| Tasks | `docs/features/knowledge-management/TASKS.md` |
+| Item   | Path                                                   |
+| ------ | ------------------------------------------------------ |
+| Design | `docs/features/knowledge-management/design.md`         |
+| Tasks  | `docs/features/knowledge-management/TASKS.md`          |
 | Source | `scripts/check-docs.js`, `scripts/update-inventory.js` |
 
 **Phases:**
@@ -147,21 +172,21 @@ Documentation organization and feature discovery system to prevent duplication a
 
 ### Source Files
 
-| File | Features |
-|------|----------|
-| `src/extension.ts` | Copilot Proxy, Webview Status Panel |
-| `src/core.ts` | Copilot Proxy, Code Health Refactor, Security Hardening |
-| `src/test/core.test.ts` | Code Health Refactor |
+| File                    | Features                                                |
+| ----------------------- | ------------------------------------------------------- |
+| `src/extension.ts`      | Copilot Proxy, Webview Status Panel                     |
+| `src/core.ts`           | Copilot Proxy, Code Health Refactor, Security Hardening |
+| `src/test/core.test.ts` | Code Health Refactor                                    |
 
 ### Documentation Files
 
-| Directory | Feature |
-|-----------|---------|
-| `docs/features/copilot-proxy/` | Copilot Proxy |
+| Directory                             | Feature              |
+| ------------------------------------- | -------------------- |
+| `docs/features/copilot-proxy/`        | Copilot Proxy        |
 | `docs/features/webview-status-panel/` | Webview Status Panel |
 | `docs/features/code-health-refactor/` | Code Health Refactor |
-| `docs/features/security-hardening/` | Security Hardening |
-| `docs/features/tool-calling/` | Tool Calling |
+| `docs/features/security-hardening/`   | Security Hardening   |
+| `docs/features/tool-calling/`         | Tool Calling         |
 | `docs/features/knowledge-management/` | Knowledge Management |
 
 ---
@@ -170,33 +195,33 @@ Documentation organization and feature discovery system to prevent duplication a
 
 See `docs/CONFIGURATION.md` for detailed configuration documentation.
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `copilotProxy.port` | number | 8080 | Server port |
-| `copilotProxy.autoStart` | boolean | true | Auto-start on activation |
-| `copilotProxy.defaultModel` | string | "" | Default model ID |
-| `copilotProxy.logRequestsToUI` | boolean | false | Log requests to UI panel |
-| `copilotProxy.rawLogging` | boolean | false | Verbose output logging |
+| Setting                        | Type    | Default | Description              |
+| ------------------------------ | ------- | ------- | ------------------------ |
+| `copilotProxy.port`            | number  | 8080    | Server port              |
+| `copilotProxy.autoStart`       | boolean | true    | Auto-start on activation |
+| `copilotProxy.defaultModel`    | string  | ""      | Default model ID         |
+| `copilotProxy.logRequestsToUI` | boolean | false   | Log requests to UI panel |
+| `copilotProxy.rawLogging`      | boolean | false   | Verbose output logging   |
 
 ---
 
 ## Commands
 
-| Command | Title | Description |
-|---------|-------|-------------|
-| `copilot-proxy.start` | Start Server | Start the HTTP proxy server |
-| `copilot-proxy.stop` | Stop Server | Stop the HTTP proxy server |
-| `copilot-proxy.status` | Show Status | Open the status webview panel |
+| Command                | Title        | Description                   |
+| ---------------------- | ------------ | ----------------------------- |
+| `copilot-proxy.start`  | Start Server | Start the HTTP proxy server   |
+| `copilot-proxy.stop`   | Stop Server  | Stop the HTTP proxy server    |
+| `copilot-proxy.status` | Show Status  | Open the status webview panel |
 
 ---
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/v1/chat/completions` | Chat completion (streaming/non-streaming) |
-| GET | `/v1/models` | List available models |
-| GET | `/health` | Health check |
+| Method | Endpoint               | Description                               |
+| ------ | ---------------------- | ----------------------------------------- |
+| POST   | `/v1/chat/completions` | Chat completion (streaming/non-streaming) |
+| GET    | `/v1/models`           | List available models                     |
+| GET    | `/health`              | Health check                              |
 
 ---
 
