@@ -1,0 +1,18 @@
+[Unit]
+Description=VS Code Copilot Proxy (headless)
+Documentation=https://github.com/gratajik/vscode-copilot-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# @RUN_SCRIPT@ is replaced with the installed path by install-service.sh
+ExecStart=@RUN_SCRIPT@
+Restart=on-failure
+RestartSec=10
+# VS Code + the extension host can take a while to boot on first launch.
+TimeoutStartSec=120
+Environment=COPILOT_PROXY_PORT=8080
+
+[Install]
+WantedBy=default.target
