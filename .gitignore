@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+.omc/
 
 # Build output
 out/
@@ -23,3 +24,4 @@ npm-debug.log*
 # Coverage
 coverage/
 .nyc_output/
+out/
