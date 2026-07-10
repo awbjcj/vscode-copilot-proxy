@@ -369,13 +369,64 @@ async function getAvailableTools(): Promise<ToolInfo[]> {
 }
 
 /**
+ * Normalizes a JSON Schema for tool parameters so it is accepted by strict
+ * backends. Gemini returns 400 Bad Request for schemas that Claude/GPT tolerate:
+ *   - type names in uppercase enum form (`STRING`, `OBJECT`, `ARRAY`, ...), as
+ *     emitted by the google-genai SDK, instead of lowercase JSON Schema types
+ *   - an object-typed node with no `properties` field
+ *   - an array-typed node with no `items` field
+ * Uppercase types are lowercased; object/array nodes missing `properties`/
+ * `items` get an empty one added. Applied recursively at any depth. Returns a
+ * new object; the input is not mutated.
+ */
+const JSON_SCHEMA_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'array', 'object', 'null']);
+
+function normalizeSchemaType(value: unknown): unknown {
+    if (typeof value === 'string' && JSON_SCHEMA_TYPES.has(value.toLowerCase())) {
+        return value.toLowerCase();
+    }
+    if (Array.isArray(value)) {
+        return value.map(v =>
+            typeof v === 'string' && JSON_SCHEMA_TYPES.has(v.toLowerCase()) ? v.toLowerCase() : v
+        );
+    }
+    return value;
+}
+
+function normalizeToolSchema(schema: unknown): unknown {
+    if (Array.isArray(schema)) {
+        return schema.map(normalizeToolSchema);
+    }
+    if (!schema || typeof schema !== 'object') {
+        return schema;
+    }
+
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+        const isTypeKeyword = key === 'type' && (typeof value === 'string' || Array.isArray(value));
+        result[key] = isTypeKeyword ? normalizeSchemaType(value) : normalizeToolSchema(value);
+    }
+
+    if (result.type === 'object' && result.properties === undefined) {
+        result.properties = {};
+    }
+    if (result.type === 'array' && result.items === undefined) {
+        result.items = {};
+    }
+
+    return result;
+}
+
+/**
  * Converts OpenAI tool format to VS Code LanguageModelChatTool format.
  */
 function convertToVSCodeTools(tools: Tool[]): vscode.LanguageModelChatTool[] {
     return tools.map(tool => ({
         name: tool.function.name,
         description: tool.function.description || '',
-        inputSchema: tool.function.parameters
+        inputSchema: tool.function.parameters === undefined
+            ? undefined
+            : normalizeToolSchema(tool.function.parameters) as Record<string, unknown>
     }));
 }
 
