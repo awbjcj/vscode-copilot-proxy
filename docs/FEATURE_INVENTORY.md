@@ -8,6 +8,7 @@ A comprehensive catalog of all features in the VS Code Copilot Proxy extension.
 
 | Date       | Feature                      | Description                                                                                                                                                                                                  |
 | ---------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2026-07-10 | Gemini Endpoints             | Google Gemini (`generateContent`) API dialect: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent` (SSE), and `/v1beta/models` list, served by Copilot models (mirrors Anthropic support)     |
 | 2026-07-08 | Anthropic Empty-Response Fix | `/v1/messages` now always returns at least one content block (streaming and non-streaming) when Copilot yields nothing (e.g. right after an extension update), fixing the intermittent "no response" symptom |
 | 2026-06-09 | Stats by Model               | Per-model session/lifetime request breakdown table in webview, shown under the main Stats section; auto-hidden until per-model data exists                                                                   |
 | 2026-06-09 | Copilot Resilience           | Stale-session retry with model refresh, worker-OOM detection with reload prompt, and model-cache TTL refresh to keep idle proxies usable                                                                     |
@@ -146,6 +147,28 @@ OpenAI-compatible function/tool calling support with optional auto-execute mode.
 
 ---
 
+### Gemini Endpoints
+
+**Status:** Complete
+**Location:** `docs/features/gemini-endpoints/`
+
+Google Gemini (`generateContent`) API dialect served by Copilot models. Lets `google-genai` SDK clients (pointed at the proxy base URL) use Copilot without a Google API key. Mirrors the Anthropic Messages support.
+
+| Item   | Path                                                       |
+| ------ | ---------------------------------------------------------- |
+| Design | `docs/features/gemini-endpoints/design.md`                 |
+| Tasks  | `docs/features/gemini-endpoints/TASKS.md`                  |
+| Source | `src/extension.ts`, `src/core.ts`, `src/test/core.test.ts` |
+
+**Endpoints:**
+
+- `POST /v1beta/models/{model}:generateContent` - non-streaming
+- `POST /v1beta/models/{model}:streamGenerateContent` - SSE streaming
+- `GET /v1beta/models` - model list
+- `GET /v1beta/models/{model}` - single-model lookup
+
+---
+
 ### Knowledge Management
 
 **Status:** In Progress
@@ -172,11 +195,11 @@ Documentation organization and feature discovery system to prevent duplication a
 
 ### Source Files
 
-| File                    | Features                                                |
-| ----------------------- | ------------------------------------------------------- |
-| `src/extension.ts`      | Copilot Proxy, Webview Status Panel                     |
-| `src/core.ts`           | Copilot Proxy, Code Health Refactor, Security Hardening |
-| `src/test/core.test.ts` | Code Health Refactor                                    |
+| File                    | Features                                                                  |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `src/extension.ts`      | Copilot Proxy, Webview Status Panel, Gemini Endpoints                     |
+| `src/core.ts`           | Copilot Proxy, Code Health Refactor, Security Hardening, Gemini Endpoints |
+| `src/test/core.test.ts` | Code Health Refactor, Gemini Endpoints                                    |
 
 ### Documentation Files
 

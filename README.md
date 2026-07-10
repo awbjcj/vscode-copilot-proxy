@@ -1,12 +1,12 @@
 # Copilot Proxy
 
-> **Turn your GitHub Copilot subscription into an OpenAI and Anthropic-compatible API** - Use any Copilot model with your favorite AI tools, frameworks, and applications without leaving VS Code.
+> **Turn your GitHub Copilot subscription into an OpenAI, Anthropic, and Gemini-compatible API** - Use any Copilot model with your favorite AI tools, frameworks, and applications without leaving VS Code.
 
 ## About
 
-Copilot Proxy is a VS Code extension that exposes GitHub Copilot's language models through local OpenAI-compatible and Anthropic-compatible API servers. This lets you leverage your existing Copilot subscription to power external applications, scripts, and tools - no additional API costs, just your Copilot subscription.
+Copilot Proxy is a VS Code extension that exposes GitHub Copilot's language models through local OpenAI-compatible, Anthropic-compatible, and Gemini-compatible API servers. This lets you leverage your existing Copilot subscription to power external applications, scripts, and tools - no additional API costs, just your Copilot subscription.
 
-Perfect for developers who want to use Copilot's models in custom workflows, automation scripts, or with tools that expect an OpenAI or Anthropic-compatible endpoint - including **Claude Code**.
+Perfect for developers who want to use Copilot's models in custom workflows, automation scripts, or with tools that expect an OpenAI, Anthropic, or Gemini-compatible endpoint - including **Claude Code**.
 
 <p align="center">
   <img src="images/CopilotProxy.png" alt="Copilot Proxy" width="600">
@@ -28,6 +28,7 @@ Perfect for developers who want to use Copilot's models in custom workflows, aut
 
 - **OpenAI-compatible API**: Exposes endpoints that work with any OpenAI-compatible client
 - **Anthropic-compatible API**: Exposes the `/v1/messages` endpoint for Anthropic SDK clients and Claude Code
+- **Gemini-compatible API**: Exposes `/v1beta/models/{model}:generateContent` and `:streamGenerateContent` for the `google-genai` SDK (no Google API key required)
 - **All Copilot Models**: Access any model available through your GitHub Copilot subscription
 - **Tool/Function Calling**: Full support for OpenAI-compatible tool calling with pass-through or auto-execute modes
 - **VS Code Tools Integration**: Use VS Code's registered tools (from extensions and MCP servers) in your requests
@@ -105,6 +106,7 @@ Example output:
 [10:30:15] Server started on 127.0.0.1:8080
 [10:30:15] Endpoint: http://127.0.0.1:8080/v1/chat/completions (OpenAI)
 [10:30:15] Endpoint: http://127.0.0.1:8080/v1/messages (Anthropic)
+[10:30:15] Endpoint: http://127.0.0.1:8080/v1beta/models/{model}:generateContent (Gemini)
 [10:30:15]   Model: GPT-4o (gpt-4o) - max 128000 tokens
 [10:30:15]   Model: Claude 3.5 Sonnet (claude-3.5-sonnet) - max 16384 tokens
 [10:30:20] Request: 3 messages, ~1500 chars (~375 tokens), model: gpt-4o, stream: true
@@ -255,6 +257,35 @@ message = client.messages.create(
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(message.content[0].text)
+```
+
+### With the Google Gen AI SDK (Gemini)
+
+Point the `google-genai` SDK at the proxy's base URL - no Google API key needed. The requested model is mapped to the best available Copilot model (or `copilotProxy.defaultModel`).
+
+```python
+from google import genai
+
+client = genai.Client(
+    api_key="not-needed",  # Any value works; the proxy does not validate it
+    http_options={"base_url": "http://127.0.0.1:8080"}
+)
+
+response = client.models.generate_content(
+    model="gemini-2.5-flash",
+    contents="Explain quantum computing"
+)
+print(response.text)
+```
+
+### With curl (Gemini)
+
+```bash
+curl "http://127.0.0.1:8080/v1beta/models/gemini-2.5-flash:generateContent" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role": "user", "parts": [{"text": "Write a haiku"}]}]
+  }'
 ```
 
 ### With curl (Anthropic format)

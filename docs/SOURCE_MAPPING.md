@@ -10,16 +10,18 @@ Maps source code files to their corresponding feature documentation.
 
 **Primary File:** Main extension entry point
 
-| Feature | Functions/Sections |
-|---------|-------------------|
-| Copilot Proxy | `handleChatCompletion`, `handleModels`, `handleHealth`, `createServer`, `startServer`, `stopServer` |
-| Webview Status Panel | `getWebviewContent`, `showStatus`, `updateStatusPanel` |
-| Security Hardening | CORS handling, origin validation |
+| Feature              | Functions/Sections                                                                                  |
+| -------------------- | --------------------------------------------------------------------------------------------------- |
+| Copilot Proxy        | `handleChatCompletion`, `handleModels`, `handleHealth`, `createServer`, `startServer`, `stopServer` |
+| Webview Status Panel | `getWebviewContent`, `showStatus`, `updateStatusPanel`                                              |
+| Security Hardening   | CORS handling, origin validation                                                                    |
+| Gemini Endpoints     | `handleGeminiGenerateContent`, `handleGeminiModels`, `handleGeminiModel`                            |
 
 **Related Docs:**
 
 - `docs/features/copilot-proxy/design.md`
 - `docs/features/webview-status-panel/design.md`
+- `docs/features/gemini-endpoints/design.md`
 
 ---
 
@@ -27,17 +29,19 @@ Maps source code files to their corresponding feature documentation.
 
 **Primary File:** Shared utilities and types
 
-| Feature | Functions/Sections |
-|---------|-------------------|
-| Copilot Proxy | `ChatMessage`, `OpenAIResponse`, `StreamChunk`, `parseRequestBody`, `validateRequest` |
-| Code Health Refactor | All utility functions, type definitions |
-| Security Hardening | `getCorsHeaders`, `isLocalhostOrigin`, `escapeHtml`, `MAX_REQUEST_BODY_SIZE`, `REQUEST_TIMEOUT_MS` |
+| Feature              | Functions/Sections                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Copilot Proxy        | `ChatMessage`, `OpenAIResponse`, `StreamChunk`, `parseRequestBody`, `validateRequest`                                                                              |
+| Code Health Refactor | All utility functions, type definitions                                                                                                                            |
+| Security Hardening   | `getCorsHeaders`, `isLocalhostOrigin`, `escapeHtml`, `MAX_REQUEST_BODY_SIZE`, `REQUEST_TIMEOUT_MS`                                                                 |
+| Gemini Endpoints     | `GeminiRequest`, `GeminiResponse`, `parseGeminiRequestBody`, `validateGeminiRequest`, `convertGeminiToInternal`, `createGeminiResponse`, `createGeminiStreamChunk` |
 
 **Related Docs:**
 
 - `docs/features/copilot-proxy/design.md`
 - `docs/features/code-health-refactor/design.md`
 - `docs/features/security-hardening/design.md`
+- `docs/features/gemini-endpoints/design.md`
 
 ---
 
@@ -45,14 +49,16 @@ Maps source code files to their corresponding feature documentation.
 
 **Primary File:** Unit tests for core.ts
 
-| Feature | Test Suites |
-|---------|-------------|
-| Code Health Refactor | All test suites |
-| Security Hardening | Security constants tests |
+| Feature              | Test Suites                                                                                                                                                                                  |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Code Health Refactor | All test suites                                                                                                                                                                              |
+| Security Hardening   | Security constants tests                                                                                                                                                                     |
+| Gemini Endpoints     | `parseGeminiRequestBody`, `validateGeminiRequest`, `convertGeminiToInternal`, `convertGeminiToolsToInternal`, `createGeminiResponse`, `createGeminiStreamChunk`, `createGeminiErrorResponse` |
 
 **Related Docs:**
 
 - `docs/features/code-health-refactor/TASKS.md`
+- `docs/features/gemini-endpoints/TASKS.md`
 
 ---
 
