@@ -1213,3 +1213,375 @@ export function createAnthropicErrorResponse(
         }
     };
 }
+
+// ============================================================================
+// Google Gemini (generateContent) API Types
+// @see docs/features/gemini-endpoints/design.md
+// @see https://ai.google.dev/api/generate-content
+//
+// This dialect lets clients using the google-genai SDK (pointed at this
+// proxy's base URL) talk to Copilot models. It mirrors the Anthropic support:
+// Gemini requests are converted to the internal ChatMessage format and served
+// through vscode.lm exactly like the OpenAI and Anthropic dialects.
+// ============================================================================
+
+/**
+ * A single Gemini content part. We support the text and function-call/response
+ * parts; other part kinds (inlineData, fileData) are ignored during conversion
+ * since the VS Code LM API is text/tool oriented.
+ */
+export type GeminiPart =
+    | { text: string }
+    | { functionCall: { name: string; args?: Record<string, unknown> } }
+    | { functionResponse: { name: string; response: unknown } };
+
+/**
+ * A Gemini content turn. Role is 'user' (human/tool input) or 'model'
+ * (assistant output). systemInstruction reuses this shape.
+ */
+export interface GeminiContent {
+    role?: 'user' | 'model';
+    parts: GeminiPart[];
+}
+
+/**
+ * A Gemini function declaration (tool).
+ */
+export interface GeminiFunctionDeclaration {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>; // JSON Schema (OpenAPI subset)
+}
+
+/**
+ * A Gemini tool entry - a group of function declarations.
+ */
+export interface GeminiTool {
+    functionDeclarations?: GeminiFunctionDeclaration[];
+}
+
+/**
+ * Gemini generation configuration (subset). temperature/maxOutputTokens are
+ * accepted for compatibility but not forwarded, matching how the OpenAI and
+ * Anthropic handlers treat those knobs.
+ */
+export interface GeminiGenerationConfig {
+    temperature?: number;
+    topP?: number;
+    maxOutputTokens?: number;
+    stopSequences?: string[];
+}
+
+/**
+ * Gemini generateContent request body.
+ */
+export interface GeminiRequest {
+    contents: GeminiContent[];
+    systemInstruction?: GeminiContent;
+    tools?: GeminiTool[];
+    toolConfig?: {
+        functionCallingConfig?: {
+            mode?: 'AUTO' | 'ANY' | 'NONE';
+            allowedFunctionNames?: string[];
+        };
+    };
+    generationConfig?: GeminiGenerationConfig;
+    // Proxy-specific extensions (non-standard, ignored by Google SDKs)
+    use_vscode_tools?: boolean;
+    tool_execution?: 'none' | 'auto';
+    max_tool_rounds?: number;
+}
+
+export type GeminiFinishReason = 'STOP' | 'MAX_TOKENS' | 'SAFETY' | 'RECITATION' | 'OTHER';
+
+/**
+ * A Gemini response candidate.
+ */
+export interface GeminiCandidate {
+    content: GeminiContent;
+    finishReason?: GeminiFinishReason;
+    index: number;
+}
+
+/**
+ * Token usage metadata for a Gemini response.
+ */
+export interface GeminiUsageMetadata {
+    promptTokenCount: number;
+    candidatesTokenCount: number;
+    totalTokenCount: number;
+}
+
+/**
+ * Gemini generateContent response body (also used for streaming chunks).
+ */
+export interface GeminiResponse {
+    candidates: GeminiCandidate[];
+    usageMetadata?: GeminiUsageMetadata;
+    modelVersion?: string;
+    responseId?: string;
+}
+
+/**
+ * Synthesizes a stable tool-call id from a function name. Gemini function
+ * calls/responses have no ids and are correlated by name, but the VS Code LM
+ * API (and our internal ChatMessage format) correlate tool calls and results
+ * by id. Deriving the id from the name keeps calls and their responses matched.
+ *
+ * Limitation: multiple concurrent calls to the same function in one turn share
+ * an id. This is an accepted edge case; distinct function names are the norm.
+ */
+export function geminiToolCallId(name: string): string {
+    return `gemini-call-${name}`;
+}
+
+/**
+ * Generates a unique response id for Gemini responses.
+ */
+export function generateGeminiResponseId(): string {
+    return 'gemini-' + Math.random().toString(36).substring(2, 15);
+}
+
+/**
+ * Parses a Gemini request body safely.
+ */
+export function parseGeminiRequestBody(body: string): GeminiRequest | null {
+    try {
+        return JSON.parse(body) as GeminiRequest;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Validates a Gemini generateContent request.
+ */
+export function validateGeminiRequest(request: GeminiRequest): string | null {
+    if (!request.contents || !Array.isArray(request.contents)) {
+        return 'contents is required and must be an array';
+    }
+    if (request.contents.length === 0) {
+        return 'contents array cannot be empty';
+    }
+    for (let i = 0; i < request.contents.length; i++) {
+        const content = request.contents[i];
+        if (!content || !Array.isArray(content.parts)) {
+            return `contents[${i}].parts is required and must be an array`;
+        }
+        if (content.role !== undefined && !['user', 'model'].includes(content.role)) {
+            return `contents[${i}].role must be 'user' or 'model'`;
+        }
+    }
+    if (request.tools !== undefined && !Array.isArray(request.tools)) {
+        return 'tools must be an array';
+    }
+    return null;
+}
+
+/**
+ * Extracts joined text from a list of Gemini parts.
+ */
+function geminiPartsText(parts: GeminiPart[]): string {
+    return parts
+        .filter((p): p is { text: string } => typeof (p as { text?: unknown }).text === 'string')
+        .map(p => p.text)
+        .join('');
+}
+
+/**
+ * Converts a Gemini request to the internal ChatMessage format.
+ *
+ * - systemInstruction -> system message (VS Code LM API has no system role)
+ * - role 'model' -> assistant; functionCall parts -> tool_calls
+ * - role 'user' -> user; functionResponse parts -> tool result messages
+ */
+export function convertGeminiToInternal(request: GeminiRequest): ChatMessage[] {
+    const messages: ChatMessage[] = [];
+
+    if (request.systemInstruction?.parts) {
+        const systemText = geminiPartsText(request.systemInstruction.parts);
+        if (systemText) {
+            messages.push({ role: 'system', content: systemText });
+        }
+    }
+
+    for (const content of request.contents) {
+        const parts = content.parts || [];
+        const textParts = geminiPartsText(parts);
+        const functionCalls = parts.filter(
+            (p): p is { functionCall: { name: string; args?: Record<string, unknown> } } =>
+                (p as { functionCall?: unknown }).functionCall !== undefined
+        );
+        const functionResponses = parts.filter(
+            (p): p is { functionResponse: { name: string; response: unknown } } =>
+                (p as { functionResponse?: unknown }).functionResponse !== undefined
+        );
+
+        if (content.role === 'model') {
+            if (functionCalls.length > 0) {
+                messages.push({
+                    role: 'assistant',
+                    content: textParts || null,
+                    tool_calls: functionCalls.map(fc => ({
+                        id: geminiToolCallId(fc.functionCall.name),
+                        type: 'function' as const,
+                        function: {
+                            name: fc.functionCall.name,
+                            arguments: JSON.stringify(fc.functionCall.args ?? {})
+                        }
+                    }))
+                });
+            } else {
+                messages.push({ role: 'assistant', content: textParts });
+            }
+        } else {
+            // Default to user role when unset.
+            if (functionResponses.length > 0) {
+                for (const fr of functionResponses) {
+                    const value = fr.functionResponse.response;
+                    const resultText = typeof value === 'string' ? value : JSON.stringify(value ?? {});
+                    messages.push({
+                        role: 'tool',
+                        content: resultText,
+                        tool_call_id: geminiToolCallId(fr.functionResponse.name),
+                        name: fr.functionResponse.name
+                    });
+                }
+                if (textParts) {
+                    messages.push({ role: 'user', content: textParts });
+                }
+            } else {
+                messages.push({ role: 'user', content: textParts });
+            }
+        }
+    }
+
+    return messages;
+}
+
+/**
+ * Converts Gemini tool declarations to the internal (OpenAI) tool format.
+ */
+export function convertGeminiToolsToInternal(tools: GeminiTool[]): Tool[] {
+    const result: Tool[] = [];
+    for (const tool of tools) {
+        for (const decl of tool.functionDeclarations ?? []) {
+            result.push({
+                type: 'function',
+                function: {
+                    name: decl.name,
+                    description: decl.description,
+                    parameters: decl.parameters
+                }
+            });
+        }
+    }
+    return result;
+}
+
+/**
+ * Builds the model output parts for a Gemini candidate from text + tool calls.
+ * Always returns at least one part so candidates are never empty (an empty
+ * candidate is surfaced by clients as "no response").
+ */
+function buildGeminiParts(content: string, toolCalls?: ToolCall[]): GeminiPart[] {
+    const parts: GeminiPart[] = [];
+    if (content) {
+        parts.push({ text: content });
+    }
+    if (toolCalls && toolCalls.length > 0) {
+        for (const tc of toolCalls) {
+            let args: Record<string, unknown> = {};
+            try {
+                args = JSON.parse(tc.function.arguments);
+            } catch {
+                // keep empty
+            }
+            parts.push({ functionCall: { name: tc.function.name, args } });
+        }
+    }
+    if (parts.length === 0) {
+        parts.push({ text: '' });
+    }
+    return parts;
+}
+
+/**
+ * Creates a Gemini generateContent response.
+ */
+export function createGeminiResponse(
+    model: string,
+    content: string,
+    toolCalls?: ToolCall[],
+    responseId?: string
+): GeminiResponse {
+    const parts = buildGeminiParts(content, toolCalls);
+    const candidateTokens = estimateTokens(content.length);
+    return {
+        candidates: [
+            {
+                content: { role: 'model', parts },
+                finishReason: 'STOP',
+                index: 0
+            }
+        ],
+        usageMetadata: {
+            promptTokenCount: 0,
+            candidatesTokenCount: candidateTokens,
+            totalTokenCount: candidateTokens
+        },
+        modelVersion: model,
+        responseId: responseId ?? generateGeminiResponseId()
+    };
+}
+
+/**
+ * Creates a single Gemini streaming chunk (a partial GenerateContentResponse).
+ * Intermediate chunks carry only delta parts; the caller sets finishReason and
+ * usageMetadata on the final chunk.
+ */
+export function createGeminiStreamChunk(
+    parts: GeminiPart[],
+    options: {
+        model?: string;
+        responseId?: string;
+        finishReason?: GeminiFinishReason;
+        usage?: GeminiUsageMetadata;
+    } = {}
+): GeminiResponse {
+    const candidate: GeminiCandidate = {
+        content: { role: 'model', parts },
+        index: 0
+    };
+    if (options.finishReason) {
+        candidate.finishReason = options.finishReason;
+    }
+    const chunk: GeminiResponse = { candidates: [candidate] };
+    if (options.usage) {
+        chunk.usageMetadata = options.usage;
+    }
+    if (options.model) {
+        chunk.modelVersion = options.model;
+    }
+    if (options.responseId) {
+        chunk.responseId = options.responseId;
+    }
+    return chunk;
+}
+
+/**
+ * Creates a Gemini error response (matches Google's { error: {...} } shape).
+ */
+export function createGeminiErrorResponse(
+    code: number,
+    message: string,
+    status: string
+): { error: { code: number; message: string; status: string } } {
+    return {
+        error: {
+            code,
+            message,
+            status
+        }
+    };
+}

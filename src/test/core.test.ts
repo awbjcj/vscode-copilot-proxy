@@ -42,6 +42,17 @@ import {
     convertAnthropicToolsToInternal,
     createAnthropicResponse,
     createAnthropicErrorResponse,
+    // Gemini
+    GeminiRequest,
+    GeminiTool,
+    parseGeminiRequestBody,
+    validateGeminiRequest,
+    convertGeminiToInternal,
+    convertGeminiToolsToInternal,
+    createGeminiResponse,
+    createGeminiStreamChunk,
+    createGeminiErrorResponse,
+    geminiToolCallId,
 } from '../core';
 
 describe('Core Utilities', () => {
@@ -1137,6 +1148,187 @@ describe('Anthropic API Utilities', () => {
             expect(resp.type).to.equal('error');
             expect(resp.error.type).to.equal('api_error');
             expect(resp.error.message).to.equal('Something went wrong');
+        });
+    });
+
+    describe('parseGeminiRequestBody', () => {
+        it('should parse valid JSON', () => {
+            const body = JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] });
+            const parsed = parseGeminiRequestBody(body);
+            expect(parsed).to.not.be.null;
+            expect(parsed!.contents).to.have.length(1);
+        });
+
+        it('should return null for invalid JSON', () => {
+            expect(parseGeminiRequestBody('{ not json')).to.be.null;
+        });
+    });
+
+    describe('validateGeminiRequest', () => {
+        it('should accept a valid request', () => {
+            const req: GeminiRequest = { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] };
+            expect(validateGeminiRequest(req)).to.be.null;
+        });
+
+        it('should reject missing contents', () => {
+            expect(validateGeminiRequest({} as GeminiRequest)).to.match(/contents is required/);
+        });
+
+        it('should reject empty contents', () => {
+            expect(validateGeminiRequest({ contents: [] })).to.match(/cannot be empty/);
+        });
+
+        it('should reject a content without parts array', () => {
+            const req = { contents: [{ role: 'user' }] } as unknown as GeminiRequest;
+            expect(validateGeminiRequest(req)).to.match(/parts is required/);
+        });
+
+        it('should reject an invalid role', () => {
+            const req = { contents: [{ role: 'system', parts: [{ text: 'x' }] }] } as unknown as GeminiRequest;
+            expect(validateGeminiRequest(req)).to.match(/role must be/);
+        });
+
+        it('should reject non-array tools', () => {
+            const req = { contents: [{ parts: [{ text: 'x' }] }], tools: {} } as unknown as GeminiRequest;
+            expect(validateGeminiRequest(req)).to.match(/tools must be an array/);
+        });
+    });
+
+    describe('convertGeminiToInternal', () => {
+        it('should convert a simple user turn', () => {
+            const req: GeminiRequest = { contents: [{ role: 'user', parts: [{ text: 'Hello' }] }] };
+            const messages = convertGeminiToInternal(req);
+            expect(messages).to.have.length(1);
+            expect(messages[0].role).to.equal('user');
+            expect(messages[0].content).to.equal('Hello');
+        });
+
+        it('should hoist systemInstruction into a system message', () => {
+            const req: GeminiRequest = {
+                systemInstruction: { parts: [{ text: 'Be terse' }] },
+                contents: [{ role: 'user', parts: [{ text: 'Hi' }] }]
+            };
+            const messages = convertGeminiToInternal(req);
+            expect(messages[0].role).to.equal('system');
+            expect(messages[0].content).to.equal('Be terse');
+            expect(messages[1].role).to.equal('user');
+        });
+
+        it('should map model role to assistant', () => {
+            const req: GeminiRequest = {
+                contents: [
+                    { role: 'user', parts: [{ text: 'Hi' }] },
+                    { role: 'model', parts: [{ text: 'Hello there' }] }
+                ]
+            };
+            const messages = convertGeminiToInternal(req);
+            expect(messages[1].role).to.equal('assistant');
+            expect(messages[1].content).to.equal('Hello there');
+        });
+
+        it('should convert functionCall parts to assistant tool_calls', () => {
+            const req: GeminiRequest = {
+                contents: [
+                    { role: 'user', parts: [{ text: 'weather?' }] },
+                    { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: { city: 'NYC' } } }] }
+                ]
+            };
+            const messages = convertGeminiToInternal(req);
+            const assistant = messages[1];
+            expect(assistant.role).to.equal('assistant');
+            expect(assistant.tool_calls).to.have.length(1);
+            expect(assistant.tool_calls![0].function.name).to.equal('get_weather');
+            expect(assistant.tool_calls![0].id).to.equal(geminiToolCallId('get_weather'));
+            expect(JSON.parse(assistant.tool_calls![0].function.arguments)).to.deep.equal({ city: 'NYC' });
+        });
+
+        it('should convert functionResponse parts to tool messages', () => {
+            const req: GeminiRequest = {
+                contents: [
+                    { role: 'user', parts: [{ functionResponse: { name: 'get_weather', response: { temp: 72 } } }] }
+                ]
+            };
+            const messages = convertGeminiToInternal(req);
+            expect(messages).to.have.length(1);
+            expect(messages[0].role).to.equal('tool');
+            expect(messages[0].tool_call_id).to.equal(geminiToolCallId('get_weather'));
+            expect(messages[0].content).to.equal(JSON.stringify({ temp: 72 }));
+        });
+    });
+
+    describe('convertGeminiToolsToInternal', () => {
+        it('should flatten functionDeclarations into internal tools', () => {
+            const tools: GeminiTool[] = [{
+                functionDeclarations: [
+                    { name: 'a', description: 'desc a', parameters: { type: 'object' } },
+                    { name: 'b' }
+                ]
+            }];
+            const internal = convertGeminiToolsToInternal(tools);
+            expect(internal).to.have.length(2);
+            expect(internal[0].function.name).to.equal('a');
+            expect(internal[0].function.description).to.equal('desc a');
+            expect(internal[1].function.name).to.equal('b');
+        });
+    });
+
+    describe('createGeminiResponse', () => {
+        it('should create a text-only response', () => {
+            const resp = createGeminiResponse('gemini-2.5-flash', 'Hello!');
+            expect(resp.candidates).to.have.length(1);
+            expect(resp.candidates[0].finishReason).to.equal('STOP');
+            expect(resp.candidates[0].content.role).to.equal('model');
+            const part = resp.candidates[0].content.parts[0] as { text: string };
+            expect(part.text).to.equal('Hello!');
+            expect(resp.modelVersion).to.equal('gemini-2.5-flash');
+        });
+
+        it('should include functionCall parts for tool calls', () => {
+            const toolCalls: ToolCall[] = [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'get_weather', arguments: '{"city":"NYC"}' }
+            }];
+            const resp = createGeminiResponse('gemini-2.5-flash', 'Checking', toolCalls);
+            const parts = resp.candidates[0].content.parts;
+            expect(parts).to.have.length(2);
+            const fc = parts[1] as { functionCall: { name: string; args: Record<string, unknown> } };
+            expect(fc.functionCall.name).to.equal('get_weather');
+            expect(fc.functionCall.args).to.deep.equal({ city: 'NYC' });
+        });
+
+        it('should emit an empty text part when content and tool calls are empty', () => {
+            const resp = createGeminiResponse('gemini-2.5-flash', '');
+            expect(resp.candidates[0].content.parts).to.have.length(1);
+            expect((resp.candidates[0].content.parts[0] as { text: string }).text).to.equal('');
+        });
+    });
+
+    describe('createGeminiStreamChunk', () => {
+        it('should create an intermediate delta chunk without finishReason', () => {
+            const chunk = createGeminiStreamChunk([{ text: 'delta' }], { model: 'm', responseId: 'r' });
+            expect(chunk.candidates[0].finishReason).to.be.undefined;
+            expect(chunk.usageMetadata).to.be.undefined;
+            expect(chunk.modelVersion).to.equal('m');
+            expect(chunk.responseId).to.equal('r');
+        });
+
+        it('should create a final chunk with finishReason and usage', () => {
+            const chunk = createGeminiStreamChunk([], {
+                finishReason: 'STOP',
+                usage: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 }
+            });
+            expect(chunk.candidates[0].finishReason).to.equal('STOP');
+            expect(chunk.usageMetadata!.totalTokenCount).to.equal(3);
+        });
+    });
+
+    describe('createGeminiErrorResponse', () => {
+        it('should create a Google-shaped error response', () => {
+            const resp = createGeminiErrorResponse(400, 'bad', 'INVALID_ARGUMENT');
+            expect(resp.error.code).to.equal(400);
+            expect(resp.error.message).to.equal('bad');
+            expect(resp.error.status).to.equal('INVALID_ARGUMENT');
         });
     });
 });
