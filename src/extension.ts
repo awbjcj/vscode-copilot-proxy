@@ -58,7 +58,17 @@ import {
     convertAnthropicToolsToInternal,
     createAnthropicResponse,
     createAnthropicErrorResponse,
-    getTextContent
+    getTextContent,
+    GeminiResponse,
+    GeminiPart,
+    parseGeminiRequestBody,
+    validateGeminiRequest,
+    convertGeminiToInternal,
+    convertGeminiToolsToInternal,
+    createGeminiResponse,
+    createGeminiStreamChunk,
+    createGeminiErrorResponse,
+    generateGeminiResponseId
 } from './core';
 
 let server: http.Server | null = null;
@@ -1670,6 +1680,478 @@ async function handleAnthropicMessages(req: http.IncomingMessage, res: http.Serv
     });
 }
 
+// ============================================================================
+// Google Gemini (generateContent) endpoint support
+// @see docs/features/gemini-endpoints/design.md
+// ============================================================================
+
+/**
+ * Sends a Gemini-formatted error response ({ error: { code, message, status } }).
+ */
+function sendGeminiErrorResponse(
+    res: http.ServerResponse,
+    statusCode: number,
+    message: string,
+    status: string
+): void {
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(createGeminiErrorResponse(statusCode, message, status)));
+}
+
+/**
+ * Writes a Gemini SSE chunk (google-genai streams with `data: {json}` lines).
+ */
+function writeGeminiSSE(res: http.ServerResponse, chunk: GeminiResponse): void {
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+}
+
+/**
+ * Merges Gemini tool declarations with VS Code tools if requested.
+ */
+async function mergeGeminiWithVSCodeTools(
+    requestTools: import('./core').GeminiTool[] | undefined,
+    useVSCodeTools: boolean
+): Promise<Tool[]> {
+    const tools: Tool[] = requestTools ? convertGeminiToolsToInternal(requestTools) : [];
+
+    if (useVSCodeTools) {
+        const vsCodeTools = await getAvailableTools();
+        const existingNames = new Set(tools.map(t => t.function.name));
+
+        for (const vsTool of vsCodeTools) {
+            if (!existingNames.has(vsTool.name)) {
+                tools.push({
+                    type: 'function',
+                    function: {
+                        name: vsTool.name,
+                        description: vsTool.description,
+                        parameters: vsTool.inputSchema
+                    }
+                });
+            }
+        }
+    }
+
+    return tools;
+}
+
+/**
+ * Handles POST /v1beta/models/{model}:generateContent and
+ * :streamGenerateContent. Converts the Gemini request to the internal format
+ * and serves it through Copilot, mirroring the Anthropic handler.
+ */
+async function handleGeminiGenerateContent(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    requestedModelName: string,
+    stream: boolean
+): Promise<void> {
+    let body = '';
+    let bodySize = 0;
+    let aborted = false;
+    const startTime = Date.now();
+    const endpoint = `/v1beta/models/${requestedModelName}:${stream ? 'streamGenerateContent' : 'generateContent'}`;
+
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+        if (!aborted) {
+            aborted = true;
+            logError(`Gemini request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+            sendGeminiErrorResponse(res, 408, 'Request timeout', 'DEADLINE_EXCEEDED');
+            req.destroy();
+        }
+    });
+
+    req.on('data', chunk => {
+        bodySize += chunk.length;
+        if (bodySize > MAX_REQUEST_BODY_SIZE) {
+            aborted = true;
+            logError(`Gemini request body too large: ${bodySize} bytes`);
+            sendGeminiErrorResponse(res, 413, 'Request body too large', 'INVALID_ARGUMENT');
+            req.destroy();
+            return;
+        }
+        body += chunk.toString();
+    });
+
+    req.on('end', async () => {
+        if (aborted) return;
+        try {
+            const parsed = parseGeminiRequestBody(body);
+            if (!parsed) {
+                logError('Invalid JSON in Gemini request body');
+                sendGeminiErrorResponse(res, 400, 'Invalid JSON in request body', 'INVALID_ARGUMENT');
+                return;
+            }
+
+            logRaw('GEMINI REQUEST', JSON.stringify(parsed, null, 2));
+
+            const validationError = validateGeminiRequest(parsed);
+            if (validationError) {
+                logError(`Gemini request validation failed: ${validationError}`);
+                sendGeminiErrorResponse(res, 400, validationError, 'INVALID_ARGUMENT');
+                return;
+            }
+
+            const request = parsed;
+            const responseId = generateGeminiResponseId();
+
+            const model = await getModel(requestedModelName);
+
+            const internalMessages = convertGeminiToInternal(request);
+            const messageCount = internalMessages.length;
+            const totalChars = internalMessages.reduce((sum, m) => sum + getTextContent(m.content).length, 0);
+            const estimatedTokens = Math.ceil(totalChars / 4);
+
+            if (!model) {
+                logError(`No language models available for Gemini request (requested: ${requestedModelName})`);
+                sendGeminiErrorResponse(res, 503, 'No language models available. Make sure GitHub Copilot is installed and authenticated, then open Copilot Chat once (type a message and stop) and retry.', 'UNAVAILABLE');
+                return;
+            }
+
+            const allTools = await mergeGeminiWithVSCodeTools(request.tools, request.use_vscode_tools ?? false);
+            const hasTools = allTools.length > 0;
+
+            log(`Gemini request: ${messageCount} msgs, ~${estimatedTokens} tokens, stream: ${stream}${hasTools ? `, ${allTools.length} tools` : ''}`, 'request');
+            log(`Model: ${requestedModelName} → ${model.name} (${model.id})`, 'model');
+
+            const vsCodeMessages = convertToVSCodeMessages(internalMessages);
+
+            const cancellationSource = new vscode.CancellationTokenSource();
+            let timeoutId: ReturnType<typeof setTimeout> = setTimeout(() => cancellationSource.cancel(), REQUEST_TIMEOUT_MS);
+
+            const options: vscode.LanguageModelChatRequestOptions = {};
+            if (hasTools) {
+                options.tools = convertToVSCodeTools(allTools);
+                if (request.toolConfig?.functionCallingConfig?.mode === 'ANY') {
+                    options.toolMode = vscode.LanguageModelChatToolMode.Required;
+                }
+            }
+
+            // Auto-execute mode (proxy extension): run the tool loop server-side.
+            if (request.tool_execution === 'auto' && hasTools) {
+                log('Gemini auto-execute mode enabled', 'tool');
+                try {
+                    const maxRounds = request.max_tool_rounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+                    const result = await runAutoExecuteLoop(
+                        model,
+                        requestedModelName,
+                        vsCodeMessages,
+                        options,
+                        maxRounds,
+                        cancellationSource.token
+                    );
+
+                    log(`Gemini auto-execute response: ~${result.content.length} chars, ${result.toolCallsExecuted} tool call(s)`);
+                    logRaw('GEMINI RESPONSE (auto-execute)', result.content);
+
+                    const geminiResponse = createGeminiResponse(model.id, result.content, undefined, responseId);
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Connection': 'close',
+                        ...getCorsHeaders(req.headers.origin)
+                    });
+                    res.end(JSON.stringify(geminiResponse));
+
+                    addRequestLog({
+                        id: responseId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint,
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: result.content.length,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'success'
+                    });
+                } catch (error) {
+                    const durationMs = Date.now() - startTime;
+                    logError(`Gemini auto-execute failed after ${durationMs}ms`, error);
+                    const errorMessage = describeRequestError(error);
+                    if (error instanceof CopilotNotReadyError) {
+                        sendGeminiErrorResponse(res, 503, errorMessage, 'UNAVAILABLE');
+                    } else {
+                        sendGeminiErrorResponse(res, 500, errorMessage, 'INTERNAL');
+                    }
+
+                    addRequestLog({
+                        id: responseId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint,
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: 0,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'error',
+                        errorMessage
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                    cancellationSource.dispose();
+                }
+                return;
+            }
+
+            if (stream) {
+                res.writeHead(200, {
+                    'Content-Type': 'text/event-stream',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    ...getCorsHeaders(req.headers.origin)
+                });
+
+                // Activity-based inactivity timeout for long-running streams.
+                clearTimeout(timeoutId);
+                const resetStreamTimeout = () => {
+                    clearTimeout(timeoutId);
+                    timeoutId = setTimeout(() => cancellationSource.cancel(), STREAM_INACTIVITY_TIMEOUT_MS);
+                };
+                resetStreamTimeout();
+
+                res.on('close', () => cancellationSource.cancel());
+                req.setTimeout(0);
+                req.socket?.setTimeout(0);
+
+                try {
+                    const { response } = await sendRequestWithRetry(model, requestedModelName, vsCodeMessages, options, cancellationSource.token);
+
+                    let responseChars = 0;
+                    let fullResponse = '';
+                    const toolCalls: ToolCall[] = [];
+
+                    const modelStream = response.stream || (async function* () {
+                        for await (const text of response.text) {
+                            yield new vscode.LanguageModelTextPart(text);
+                        }
+                    })();
+
+                    for await (const part of modelStream) {
+                        resetStreamTimeout();
+                        if (part instanceof vscode.LanguageModelTextPart) {
+                            const text = part.value;
+                            responseChars += text.length;
+                            fullResponse += text;
+                            writeGeminiSSE(res, createGeminiStreamChunk(
+                                [{ text }],
+                                { model: model.id, responseId }
+                            ));
+                        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+                            const toolCall = convertToolCallPart(part);
+                            toolCalls.push(toolCall);
+                            let args: Record<string, unknown> = {};
+                            try {
+                                args = JSON.parse(toolCall.function.arguments);
+                            } catch {
+                                // keep empty
+                            }
+                            writeGeminiSSE(res, createGeminiStreamChunk(
+                                [{ functionCall: { name: toolCall.function.name, args } }],
+                                { model: model.id, responseId }
+                            ));
+                            log(`Gemini tool call: ${toolCall.function.name}(${toolCall.function.arguments})`, 'tool');
+                        }
+                    }
+
+                    // Final chunk carries finishReason + usage. If Copilot yielded
+                    // nothing, emit an empty text part so the stream is well-formed.
+                    const finalParts: GeminiPart[] = (responseChars === 0 && toolCalls.length === 0)
+                        ? [{ text: '' }]
+                        : [];
+                    const candidateTokens = Math.ceil(responseChars / 4);
+                    writeGeminiSSE(res, createGeminiStreamChunk(finalParts, {
+                        model: model.id,
+                        responseId,
+                        finishReason: 'STOP',
+                        usage: {
+                            promptTokenCount: estimatedTokens,
+                            candidatesTokenCount: candidateTokens,
+                            totalTokenCount: estimatedTokens + candidateTokens
+                        }
+                    }));
+                    res.end();
+
+                    const toolInfo = toolCalls.length > 0 ? `, ${toolCalls.length} tool call(s)` : '';
+                    log(`Gemini response (stream): ~${responseChars} chars (~${candidateTokens} tokens)${toolInfo}`, 'stream');
+                    logRaw('GEMINI RESPONSE (stream)', fullResponse);
+
+                    addRequestLog({
+                        id: responseId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint,
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: responseChars,
+                        stream: true,
+                        durationMs: Date.now() - startTime,
+                        status: 'success'
+                    });
+                } catch (error) {
+                    const durationMs = Date.now() - startTime;
+                    logError(`Gemini streaming failed after ${durationMs}ms`, error);
+                    const errorMessage = describeRequestError(error);
+                    writeGeminiSSE(res, createGeminiErrorResponse(500, errorMessage, 'INTERNAL') as unknown as GeminiResponse);
+                    res.end();
+
+                    addRequestLog({
+                        id: responseId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint,
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: 0,
+                        stream: true,
+                        durationMs: Date.now() - startTime,
+                        status: 'error',
+                        errorMessage
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                    cancellationSource.dispose();
+                }
+            } else {
+                try {
+                    const { response } = await sendRequestWithRetry(model, requestedModelName, vsCodeMessages, options, cancellationSource.token);
+
+                    let content = '';
+                    const toolCalls: ToolCall[] = [];
+
+                    const modelStream = response.stream || (async function* () {
+                        for await (const text of response.text) {
+                            yield new vscode.LanguageModelTextPart(text);
+                        }
+                    })();
+
+                    for await (const part of modelStream) {
+                        if (part instanceof vscode.LanguageModelTextPart) {
+                            content += part.value;
+                        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+                            const toolCall = convertToolCallPart(part);
+                            toolCalls.push(toolCall);
+                            log(`Gemini tool call: ${toolCall.function.name}(${toolCall.function.arguments})`, 'tool');
+                        }
+                    }
+
+                    const responseTokens = Math.ceil(content.length / 4);
+                    const toolInfo = toolCalls.length > 0 ? `, ${toolCalls.length} tool call(s)` : '';
+                    log(`Gemini response: ~${content.length} chars (~${responseTokens} tokens)${toolInfo}`, 'response');
+                    logRaw('GEMINI RESPONSE', content);
+
+                    const geminiResponse = createGeminiResponse(
+                        model.id,
+                        content,
+                        toolCalls.length > 0 ? toolCalls : undefined,
+                        responseId
+                    );
+
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Connection': 'close',
+                        ...getCorsHeaders(req.headers.origin)
+                    });
+                    res.end(JSON.stringify(geminiResponse));
+
+                    addRequestLog({
+                        id: responseId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint,
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: content.length,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'success'
+                    });
+                } catch (error) {
+                    const durationMs = Date.now() - startTime;
+                    logError(`Gemini non-streaming failed after ${durationMs}ms`, error);
+                    const errorMessage = describeRequestError(error);
+                    if (error instanceof CopilotNotReadyError) {
+                        sendGeminiErrorResponse(res, 503, errorMessage, 'UNAVAILABLE');
+                    } else {
+                        sendGeminiErrorResponse(res, 500, errorMessage, 'INTERNAL');
+                    }
+
+                    addRequestLog({
+                        id: responseId,
+                        timestamp: new Date().toISOString(),
+                        method: 'POST',
+                        endpoint,
+                        model: model.id,
+                        messageCount,
+                        inputChars: totalChars,
+                        outputChars: 0,
+                        stream: false,
+                        durationMs: Date.now() - startTime,
+                        status: 'error',
+                        errorMessage
+                    });
+                } finally {
+                    clearTimeout(timeoutId);
+                    cancellationSource.dispose();
+                }
+            }
+        } catch (error) {
+            logError('Invalid Gemini request', error);
+            const errorMessage = error instanceof Error ? error.message : 'Invalid JSON';
+            sendGeminiErrorResponse(res, 400, errorMessage, 'INVALID_ARGUMENT');
+        }
+    });
+}
+
+/**
+ * Builds the Gemini model descriptor for a VS Code model.
+ */
+function toGeminiModelDescriptor(model: vscode.LanguageModelChat): Record<string, unknown> {
+    return {
+        name: `models/${model.id}`,
+        version: model.version,
+        displayName: model.name,
+        description: `${model.name} via GitHub Copilot (${model.vendor})`,
+        inputTokenLimit: model.maxInputTokens,
+        supportedGenerationMethods: ['generateContent', 'streamGenerateContent']
+    };
+}
+
+/**
+ * Handles GET /v1beta/models (Gemini model list).
+ */
+async function handleGeminiModels(res: http.ServerResponse, corsHeaders: Record<string, string>): Promise<void> {
+    const cacheAge = Date.now() - modelsLastRefreshed;
+    if (cachedModels.length === 0 || cacheAge > MODEL_CACHE_TTL_MS) {
+        await refreshModels();
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+    res.end(JSON.stringify({ models: cachedModels.map(toGeminiModelDescriptor) }));
+}
+
+/**
+ * Handles GET /v1beta/models/{model} (Gemini single-model lookup).
+ */
+async function handleGeminiModel(
+    res: http.ServerResponse,
+    corsHeaders: Record<string, string>,
+    requestedModelName: string
+): Promise<void> {
+    const model = await getModel(requestedModelName);
+    if (!model) {
+        sendGeminiErrorResponse(res, 404, `Model not found: ${requestedModelName}`, 'NOT_FOUND');
+        return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+    res.end(JSON.stringify(toGeminiModelDescriptor(model)));
+}
+
 async function handleModels(res: http.ServerResponse, corsHeaders: Record<string, string>): Promise<void> {
     // Only refresh if cache is stale (TTL expired) or empty
     const cacheAge = Date.now() - modelsLastRefreshed;
@@ -1750,6 +2232,25 @@ function createServer(_port: number): http.Server {
             await handleChatCompletion(req, res);
         } else if (req.method === 'POST' && (urlPath === '/v1/messages' || urlPath === '/messages')) {
             await handleAnthropicMessages(req, res);
+        } else if (req.method === 'POST' && urlPath.startsWith('/v1beta/models/')) {
+            // Gemini: /v1beta/models/{model}:generateContent | :streamGenerateContent
+            const spec = urlPath.substring('/v1beta/models/'.length);
+            const colonIdx = spec.lastIndexOf(':');
+            const modelName = colonIdx === -1 ? spec : spec.substring(0, colonIdx);
+            const method = colonIdx === -1 ? '' : spec.substring(colonIdx + 1);
+            const decodedModel = decodeURIComponent(modelName);
+            if (method === 'generateContent') {
+                await handleGeminiGenerateContent(req, res, decodedModel, false);
+            } else if (method === 'streamGenerateContent') {
+                await handleGeminiGenerateContent(req, res, decodedModel, true);
+            } else {
+                sendErrorResponse(res, 404, `Unsupported Gemini method: ${method || '(none)'}`, 'not_found');
+            }
+        } else if (req.method === 'GET' && (urlPath === '/v1beta/models' || urlPath === '/v1beta/models/')) {
+            await handleGeminiModels(res, corsHeaders);
+        } else if (req.method === 'GET' && urlPath.startsWith('/v1beta/models/')) {
+            const modelName = decodeURIComponent(urlPath.substring('/v1beta/models/'.length));
+            await handleGeminiModel(res, corsHeaders, modelName);
         } else if (req.method === 'GET' && (urlPath === '/v1/models' || urlPath === '/models')) {
             await handleModels(res, corsHeaders);
         } else if (req.method === 'GET' && (urlPath === '/v1/tools' || urlPath === '/tools')) {
@@ -1798,7 +2299,7 @@ async function startServer(): Promise<void> {
         log(`Server running on 127.0.0.1:${port}`, 'success');
         log(`Endpoint: http://127.0.0.1:${port}/v1/chat/completions`, 'info');
         log(`Endpoint: http://127.0.0.1:${port}/v1/messages (Anthropic)`, 'info');
-
+        log(`Endpoint: http://127.0.0.1:${port}/v1beta/models/{model}:generateContent (Gemini)`, 'info');
         // Log available models after server starts
         const models = await refreshModels();
         log(`Loaded ${models.length} model(s):`, 'model');
