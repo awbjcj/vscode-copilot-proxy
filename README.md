@@ -60,8 +60,6 @@ Perfect for developers who want to use Copilot's models in custom workflows, aut
 3. Run `npm run compile`
 4. Press F5 to launch the extension in a new VS Code window
 
-
-
 ## Usage
 
 ### Starting the Server
@@ -144,11 +142,11 @@ export ANTHROPIC_API_KEY="sk-..."  # Optional: enables fallback
 py examples/vscode_llm_example_full.py
 ```
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `VSCODE_LLM_ENDPOINT` | `http://127.0.0.1:8080/v1/chat/completions` | Proxy endpoint URL |
-| `VSCODE_LLM_FALLBACK` | `true` | Enable/disable Anthropic fallback |
-| `ANTHROPIC_API_KEY` | (none) | Required for fallback support |
+| Environment Variable  | Default                                     | Description                       |
+| --------------------- | ------------------------------------------- | --------------------------------- |
+| `VSCODE_LLM_ENDPOINT` | `http://127.0.0.1:8080/v1/chat/completions` | Proxy endpoint URL                |
+| `VSCODE_LLM_FALLBACK` | `true`                                      | Enable/disable Anthropic fallback |
+| `ANTHROPIC_API_KEY`   | (none)                                      | Required for fallback support     |
 
 ### With Python (OpenAI client)
 
@@ -203,13 +201,13 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ### With Node.js
 
 ```javascript
-const response = await fetch('http://127.0.0.1:8080/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-        model: 'claude-3.5-sonnet',
-        messages: [{ role: 'user', content: 'Hello!' }]
-    })
+const response = await fetch("http://127.0.0.1:8080/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: "claude-3.5-sonnet",
+    messages: [{ role: "user", content: "Hello!" }],
+  }),
 });
 const data = await response.json();
 console.log(data.choices[0].message.content);
@@ -354,10 +352,12 @@ curl -X POST http://127.0.0.1:8080/v1/messages \
   "id": "msg_abc123",
   "type": "message",
   "role": "assistant",
-  "content": [{
-    "type": "text",
-    "text": "Hello! How can I help you today?"
-  }],
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello! How can I help you today?"
+    }
+  ],
   "model": "copilot-claude-3.5-sonnet",
   "stop_reason": "end_turn",
   "stop_sequence": null,
@@ -398,14 +398,16 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   "object": "chat.completion",
   "created": 1234567890,
   "model": "copilot-claude-3.5-sonnet",
-  "choices": [{
-    "index": 0,
-    "message": {
-      "role": "assistant",
-      "content": "Hello! How can I help you today?"
-    },
-    "finish_reason": "stop"
-  }],
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
   "usage": {
     "prompt_tokens": 0,
     "completion_tokens": 0,
@@ -548,13 +550,13 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 **Tool Calling Options:**
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `tools` | array | - | Array of tool definitions (OpenAI format) |
-| `tool_choice` | string | `"auto"` | `"none"`, `"auto"`, or `"required"` |
-| `use_vscode_tools` | boolean | `false` | Include all VS Code registered tools |
-| `tool_execution` | string | `"none"` | `"none"` (pass-through) or `"auto"` (proxy executes) |
-| `max_tool_rounds` | number | `10` | Max iterations in auto mode (0 = unlimited) |
+| Option             | Type    | Default  | Description                                          |
+| ------------------ | ------- | -------- | ---------------------------------------------------- |
+| `tools`            | array   | -        | Array of tool definitions (OpenAI format)            |
+| `tool_choice`      | string  | `"auto"` | `"none"`, `"auto"`, or `"required"`                  |
+| `use_vscode_tools` | boolean | `false`  | Include all VS Code registered tools                 |
+| `tool_execution`   | string  | `"none"` | `"none"` (pass-through) or `"auto"` (proxy executes) |
+| `max_tool_rounds`  | number  | `10`     | Max iterations in auto mode (0 = unlimited)          |
 
 See `examples/vscode_llm_tools_auto.py` for a complete auto-execute example.
 
@@ -592,11 +594,11 @@ py examples/vscode_llm_tools_auto.py
 
 Settings available in VS Code Settings (search for "Copilot Proxy"):
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `copilotProxy.port` | `8080` | Port number for the proxy server |
-| `copilotProxy.autoStart` | `true` | Automatically start when VS Code opens |
-| `copilotProxy.defaultModel` | `""` | Default model when not specified in request (leave empty for first available) |
+| Setting                     | Default | Description                                                                   |
+| --------------------------- | ------- | ----------------------------------------------------------------------------- |
+| `copilotProxy.port`         | `8080`  | Port number for the proxy server                                              |
+| `copilotProxy.autoStart`    | `true`  | Automatically start when VS Code opens                                        |
+| `copilotProxy.defaultModel` | `""`    | Default model when not specified in request (leave empty for first available) |
 
 ## Commands
 
@@ -644,11 +646,11 @@ The server allows all origins (`Access-Control-Allow-Origin: *`) because:
 
 The following limits protect against resource exhaustion:
 
-| Limit | Value | Purpose |
-|-------|-------|---------|
-| Request body size | 10 MB | Prevents memory exhaustion |
-| Request timeout | 30 seconds | Prevents connection exhaustion |
-| Keep-alive timeout | 5 seconds | Manages idle connections |
+| Limit              | Value      | Purpose                        |
+| ------------------ | ---------- | ------------------------------ |
+| Request body size  | 10 MB      | Prevents memory exhaustion     |
+| Request timeout    | 30 seconds | Prevents connection exhaustion |
+| Keep-alive timeout | 5 seconds  | Manages idle connections       |
 
 ### Best Practices
 

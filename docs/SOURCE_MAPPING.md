@@ -66,50 +66,50 @@ Maps source code files to their corresponding feature documentation.
 
 ### Copilot Proxy
 
-| Component | File | Lines |
-|-----------|------|-------|
-| HTTP Server | `src/extension.ts` | 490-524 |
+| Component                | File               | Lines   |
+| ------------------------ | ------------------ | ------- |
+| HTTP Server              | `src/extension.ts` | 490-524 |
 | Chat Completions Handler | `src/extension.ts` | 158-442 |
-| Models Handler | `src/extension.ts` | 444-477 |
-| Health Handler | `src/extension.ts` | 479-488 |
-| Types | `src/core.ts` | 78-156 |
-| Validation | `src/core.ts` | 417-445 |
+| Models Handler           | `src/extension.ts` | 444-477 |
+| Health Handler           | `src/extension.ts` | 479-488 |
+| Types                    | `src/core.ts`      | 78-156  |
+| Validation               | `src/core.ts`      | 417-445 |
 
 ---
 
 ### Webview Status Panel
 
-| Component | File | Lines |
-|-----------|------|-------|
-| HTML Content | `src/extension.ts` | 612-1239 |
-| Panel Management | `src/extension.ts` | 1241-1320 |
-| State Updates | `src/extension.ts` | 1322-1353 |
-| Model Info Type | `src/core.ts` | 126-132 |
-| Settings Info Type | `src/core.ts` | 134-140 |
+| Component          | File               | Lines     |
+| ------------------ | ------------------ | --------- |
+| HTML Content       | `src/extension.ts` | 612-1239  |
+| Panel Management   | `src/extension.ts` | 1241-1320 |
+| State Updates      | `src/extension.ts` | 1322-1353 |
+| Model Info Type    | `src/core.ts`      | 126-132   |
+| Settings Info Type | `src/core.ts`      | 134-140   |
 
 ---
 
 ### Security Hardening
 
-| Component | File | Lines |
-|-----------|------|-------|
-| Request Size Limit | `src/core.ts` | 10 |
-| Request Timeout | `src/core.ts` | 17 |
-| Keep-Alive Timeout | `src/core.ts` | 24 |
-| Headers Timeout | `src/core.ts` | 30 |
-| Localhost Check | `src/core.ts` | 42-45 |
-| CORS Headers | `src/core.ts` | 51-65 |
-| HTML Escaping | `src/core.ts` | 160-167 |
+| Component          | File          | Lines   |
+| ------------------ | ------------- | ------- |
+| Request Size Limit | `src/core.ts` | 10      |
+| Request Timeout    | `src/core.ts` | 17      |
+| Keep-Alive Timeout | `src/core.ts` | 24      |
+| Headers Timeout    | `src/core.ts` | 30      |
+| Localhost Check    | `src/core.ts` | 42-45   |
+| CORS Headers       | `src/core.ts` | 51-65   |
+| HTML Escaping      | `src/core.ts` | 160-167 |
 
 ---
 
 ### Code Health Refactor
 
-| Component | File | Lines |
-|-----------|------|-------|
-| Utility Functions | `src/core.ts` | 160-470 |
-| Type Definitions | `src/core.ts` | 78-156 |
-| Unit Tests | `src/test/core.test.ts` | All |
+| Component         | File                    | Lines   |
+| ----------------- | ----------------------- | ------- |
+| Utility Functions | `src/core.ts`           | 160-470 |
+| Type Definitions  | `src/core.ts`           | 78-156  |
+| Unit Tests        | `src/test/core.test.ts` | All     |
 
 ---
 
@@ -117,11 +117,11 @@ Maps source code files to their corresponding feature documentation.
 
 Areas of code that may need documentation:
 
-| File | Section | Recommended Action |
-|------|---------|-------------------|
+| File               | Section         | Recommended Action               |
+| ------------------ | --------------- | -------------------------------- |
 | `src/extension.ts` | Request logging | Add to webview-status-panel docs |
-| `src/extension.ts` | Model caching | Add to copilot-proxy docs |
-| `src/core.ts` | Model matching | Already documented in code JSDoc |
+| `src/extension.ts` | Model caching   | Add to copilot-proxy docs        |
+| `src/core.ts`      | Model matching  | Already documented in code JSDoc |
 
 ---
 
